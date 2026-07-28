@@ -42,11 +42,10 @@ jobs:
     - name: Download SIMDe for ARM64 X86 Translation
       run: |
         git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
-        # Place simde directly inside the Bindings folder so relative includes find it immediately
         mv simde-repo/simde Bindings/simde
         
-        # Patch simd.h / SIMD.cpp to use SIMDe headers instead of native x86 headers on ARM
-        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's@#include <immintrin.h>@#if defined(__aarch64__) || defined(_M_ARM64)\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif@g' {} +
+        # Completely replace #include <immintrin.h> with SIMDe headers and disable native x86 intrinsics on non-x86 architectures
+        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's@#include <immintrin.h>@#define SIMDE_NO_NATIVE\n#include "simde/x86/avx2.h"@g' {} +
 
     - name: Cross-Compile C++ SIMD Bindings for Android AArch64
       run: |
@@ -58,6 +57,7 @@ jobs:
           -funroll-loops \
           -march=armv8-a \
           -DSIMDE_ENABLE_NATIVE_ALIASES \
+          -DSIMDE_NO_NATIVE \
           -I./Bindings \
           -fPIC \
           -shared \
