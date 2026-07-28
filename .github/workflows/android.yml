@@ -76,23 +76,29 @@ jobs:
           ./Bindings/SIMD.cpp \
           -pthread
 
-    - name: Publish .NET Application for Linux ARM64 (Single-File)
+    - name: Publish .NET Application for Linux ARM64 (Standalone Single-File)
       run: |
         dotnet publish . \
-          --self-contained true \
           -c Release \
           -r linux-arm64 \
+          --self-contained true \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
           -p:UseAppHost=true \
           -p:PublishSingleFile=true \
-          -p:PublishTrimmed=false
+          -p:IncludeNativeLibrariesForSelfExtract=true
+
+    - name: Verify Output File Size
+      run: |
+        ls -lh bin/Release/*/linux-arm64/publish/ || true
+        ls -lh bin/Release/net*/linux-arm64/publish/ || true
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: lizard-android-arm64
         path: |
+          bin/Release/net*/linux-arm64/publish/Lizard
           bin/Release/*/linux-arm64/publish/Lizard
           HorsieBindings.so
 
@@ -104,6 +110,7 @@ jobs:
         name: Lizard Android Build ${{ github.run_number }}
         prerelease: true
         files: |
+          bin/Release/net*/linux-arm64/publish/Lizard
           bin/Release/*/linux-arm64/publish/Lizard
           HorsieBindings.so
       env:
