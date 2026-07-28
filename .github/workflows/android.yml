@@ -51,7 +51,7 @@ jobs:
         # 2. Prepend SIMDe headers and enable FMA emulation support
         sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
 
-        # 3. Fix misplaced alignas syntax in SIMD.cpp (move alignas(32) to the front of declarations)
+        # 3. Fix misplaced alignas syntax in SIMD.cpp
         sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
         sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
         sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
@@ -83,7 +83,8 @@ jobs:
           -c Release \
           -r android-arm64 \
           -p:AssemblyName=Lizard \
-          -p:BINDINGS=HorsieBindings.so
+          -p:BINDINGS=HorsieBindings.so \
+          -p:UseAppHost=true
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
