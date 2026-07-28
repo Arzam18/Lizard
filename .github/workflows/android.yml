@@ -76,15 +76,17 @@ jobs:
           ./Bindings/SIMD.cpp \
           -pthread
 
-    - name: Publish .NET Application for Linux ARM64
+    - name: Publish .NET Application for Linux ARM64 (Single-File)
       run: |
         dotnet publish . \
-          --self-contained \
+          --self-contained true \
           -c Release \
           -r linux-arm64 \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
-          -p:UseAppHost=true
+          -p:UseAppHost=true \
+          -p:PublishSingleFile=true \
+          -p:PublishTrimmed=false
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
