@@ -42,7 +42,7 @@ jobs:
     - name: Download SIMDe for ARM64 X86 Translation
       run: |
         git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
-        mkdir -p Bindings/simde
+        # Place simde directly inside the Bindings folder so relative includes find it immediately
         mv simde-repo/simde Bindings/simde
         
         # Patch simd.h / SIMD.cpp to use SIMDe headers instead of native x86 headers on ARM
@@ -52,13 +52,13 @@ jobs:
       run: |
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
-        # Compiling the exact case-sensitive SIMD.cpp file found in your Bindings folder
         ${{ env.TOOLCHAIN_PREFIX }}clang++ \
           -std=c++20 \
           -O3 \
           -funroll-loops \
           -march=armv8-a \
           -DSIMDE_ENABLE_NATIVE_ALIASES \
+          -I./Bindings \
           -fPIC \
           -shared \
           -o HorsieBindings.so \
