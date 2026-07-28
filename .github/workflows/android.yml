@@ -39,17 +39,24 @@ jobs:
         echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
         echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
-    - name: Download SIMDe and Patch Bindings
+    - name: Download SIMDe and Patch C++ Bindings
       run: |
         git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
         mv simde-repo/simde Bindings/simde
         
-        # Strip out any native immintrin / x86 header inclusions from the codebase entirely
+        # 1. Strip out native header inclusions
         find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <immintrin.h>/d' {} +
         find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <xmmintrin.h>/d' {} +
 
-        # Prepend SIMDe's definitions safely to simd.h
-        sed -i '1i #define SIMDE_NO_NATIVE\n#include "simde/x86/avx2.h"' Bindings/simd.h
+        # 2. Prepend SIMDe headers and enable FMA emulation support
+        sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
+
+        # 3. Fix misplaced alignas syntax in SIMD.cpp (move alignas(32) to the front of declarations)
+        sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
+        sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
+        sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
+        sed -i 's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' Bindings/SIMD.cpp
+        sed -i 's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' Bindings/SIMD.cpp
 
     - name: Cross-Compile C++ SIMD Bindings for Android AArch64
       run: |
@@ -59,14 +66,9 @@ jobs:
           -std=c++20 \
           -O3 \
           -funroll-loops \
-          -march=armv8-a \
+          -march=armv8-a+simd \
           -DSIMDE_ENABLE_NATIVE_ALIASES \
           -DSIMDE_NO_NATIVE \
-          -ffreestanding \
-          -nostdinc++ \
-          -I$(dirname `${{ env.TOOLCHAIN_PREFIX }}clang++ -print-file-name=include`) \
-          -I/usr/local/lib/android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1 \
-          -I/usr/local/lib/android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include \
           -I./Bindings \
           -fPIC \
           -shared \
