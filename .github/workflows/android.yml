@@ -76,12 +76,12 @@ jobs:
           ./Bindings/SIMD.cpp \
           -pthread
 
-    - name: Publish .NET Application for Android
+    - name: Publish .NET Application for Linux ARM64
       run: |
         dotnet publish . \
           --self-contained \
           -c Release \
-          -r android-arm64 \
+          -r linux-arm64 \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
           -p:UseAppHost=true
@@ -91,7 +91,7 @@ jobs:
       with:
         name: lizard-android-arm64
         path: |
-          bin/Release/*/android-arm64/publish/Lizard
+          bin/Release/*/linux-arm64/publish/Lizard
           HorsieBindings.so
 
     - name: Create GitHub Prerelease
@@ -102,7 +102,7 @@ jobs:
         name: Lizard Android Build ${{ github.run_number }}
         prerelease: true
         files: |
-          bin/Release/*/android-arm64/publish/Lizard
+          bin/Release/*/linux-arm64/publish/Lizard
           HorsieBindings.so
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
