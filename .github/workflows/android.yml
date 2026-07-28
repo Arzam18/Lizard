@@ -1,20 +1,16 @@
-name: Lizard Android Build
+name: Lizard Android Native Build
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main", "master" ]
-  pull_request:
 
 permissions:
   contents: write
 
-env:
-  DOTNET_VERSION: 9.0.x
-
 jobs:
   build-android:
-    name: Lizard Android (aarch64)
+    name: Lizard Android Native (aarch64)
     runs-on: ubuntu-24.04
 
     steps:
@@ -24,7 +20,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-version: '9.0.x'
 
     - name: Set up Android NDK Environment
       run: |
@@ -44,14 +40,11 @@ jobs:
         git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
         mv simde-repo/simde Bindings/simde
         
-        # 1. Strip out native header inclusions
         find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <immintrin.h>/d' {} +
         find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <xmmintrin.h>/d' {} +
 
-        # 2. Prepend SIMDe headers and enable FMA emulation support
         sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
 
-        # 3. Fix misplaced alignas syntax in SIMD.cpp
         sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
         sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
         sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
@@ -76,11 +69,11 @@ jobs:
           ./Bindings/SIMD.cpp \
           -pthread
 
-    - name: Publish .NET Application for Linux ARM64 (Standalone Single-File)
+    - name: Publish .NET Application for Android ARM64
       run: |
         dotnet publish . \
           -c Release \
-          -r linux-arm64 \
+          -r android-arm64 \
           --self-contained true \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
@@ -88,31 +81,12 @@ jobs:
           -p:PublishSingleFile=true \
           -p:IncludeNativeLibrariesForSelfExtract=true \
           -p:PublishTrimmed=false
-        
-        # Copy the compiled .so into the publish folder so it sits right beside the Lizard executable
-        cp HorsieBindings.so bin/Release/net*/*_*-arm64/publish/ || cp HorsieBindings.so bin/Release/*/linux-arm64/publish/ || true
-
-    - name: Check Publish Output Folder
-      run: |
-        find bin/Release -name "Lizard" -o -name "HorsieBindings.so"
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: lizard-android-arm64
+        name: lizard-android-native-arm64
         path: |
           bin/Release/**/publish/Lizard
           bin/Release/**/publish/HorsieBindings.so
           HorsieBindings.so
-
-    - name: Create GitHub Prerelease
-      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: android-build-${{ github.run_number }}
-        name: Lizard Android Build ${{ github.run_number }}
-        prerelease: true
-        files: |
-          HorsieBindings.so
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
