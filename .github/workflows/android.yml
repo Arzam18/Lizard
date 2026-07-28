@@ -88,18 +88,21 @@ jobs:
           -p:PublishSingleFile=true \
           -p:IncludeNativeLibrariesForSelfExtract=true \
           -p:PublishTrimmed=false
+        
+        # Copy the compiled .so into the publish folder so it sits right beside the Lizard executable
+        cp HorsieBindings.so bin/Release/net*/*_*-arm64/publish/ || cp HorsieBindings.so bin/Release/*/linux-arm64/publish/ || true
 
-    - name: Check Total Folder Size
+    - name: Check Publish Output Folder
       run: |
-        du -sh bin/Release/*/linux-arm64/publish/* || true
+        find bin/Release -name "Lizard" -o -name "HorsieBindings.so"
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: lizard-android-arm64
         path: |
-          bin/Release/net*/linux-arm64/publish/Lizard
-          bin/Release/*/linux-arm64/publish/Lizard
+          bin/Release/**/publish/Lizard
+          bin/Release/**/publish/HorsieBindings.so
           HorsieBindings.so
 
     - name: Create GitHub Prerelease
@@ -110,8 +113,6 @@ jobs:
         name: Lizard Android Build ${{ github.run_number }}
         prerelease: true
         files: |
-          bin/Release/net*/linux-arm64/publish/Lizard
-          bin/Release/*/linux-arm64/publish/Lizard
           HorsieBindings.so
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
