@@ -1,0 +1,88 @@
+name: Lizard Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_VERSION: 9.0.x
+
+jobs:
+  build-android:
+    name: Lizard Android (aarch64)
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Clone Repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Set up Android NDK Environment
+      run: |
+        NDKV="27.2.12479018"
+        ANDROID_ROOT=/usr/local/lib/android
+        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
+        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+        echo "y" | $SDKMANAGER "ndk;$NDKV"
+        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
+        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+        
+        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
+        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
+
+    - name: Cross-Compile C++ SIMD Bindings for Android AArch64
+      run: |
+        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+        
+        # Compile HorsieBindings.cpp / simd.cpp into a shared library (.so) for Android
+        # We use SIMDe via the C++ headers or fallback code flags if necessary
+        ${{ env.TOOLCHAIN_PREFIX }}clang++ \
+          -std=c++20 \
+          -O3 \
+          -funroll-loops \
+          -march=armv8-a \
+          -fPIC \
+          -shared \
+          -o HorsieBindings.so \
+          ./Bindings/simd.cpp \
+          -pthread
+
+    - name: Publish .NET Application for Android
+      run: |
+        # Publish using the standard self-contained portable runtime for Linux/Android ARM64
+        dotnet publish . \
+          --self-contained \
+          -c Release \
+          -r android-arm64 \
+          -p:AssemblyName=Lizard \
+          -p:BINDINGS=HorsieBindings.so
+
+    - name: Upload Binary Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lizard-android-arm64
+        path: |
+          bin/Release/*/android-arm64/publish/Lizard
+          HorsieBindings.so
+
+    - name: Create GitHub Prerelease
+      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: android-build-${{ github.run_number }}
+        name: Lizard Android Build ${{ github.run_number }}
+        prerelease: true
+        files: |
+          bin/Release/*/android-arm64/publish/Lizard
+          HorsieBindings.so
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
