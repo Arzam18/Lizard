@@ -39,26 +39,34 @@ jobs:
         echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
         echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
+    - name: Download SIMDe for ARM64 X86 Translation
+      run: |
+        git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
+        mkdir -p Bindings/simde
+        mv simde-repo/simde Bindings/simde
+        
+        # Patch simd.h / SIMD.cpp to use SIMDe headers instead of native x86 headers on ARM
+        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's@#include <immintrin.h>@#if defined(__aarch64__) || defined(_M_ARM64)\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif@g' {} +
+
     - name: Cross-Compile C++ SIMD Bindings for Android AArch64
       run: |
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
-        # Compile HorsieBindings.cpp / simd.cpp into a shared library (.so) for Android
-        # We use SIMDe via the C++ headers or fallback code flags if necessary
+        # Compiling the exact case-sensitive SIMD.cpp file found in your Bindings folder
         ${{ env.TOOLCHAIN_PREFIX }}clang++ \
           -std=c++20 \
           -O3 \
           -funroll-loops \
           -march=armv8-a \
+          -DSIMDE_ENABLE_NATIVE_ALIASES \
           -fPIC \
           -shared \
           -o HorsieBindings.so \
-          ./Bindings/simd.cpp \
+          ./Bindings/SIMD.cpp \
           -pthread
 
     - name: Publish .NET Application for Android
       run: |
-        # Publish using the standard self-contained portable runtime for Linux/Android ARM64
         dotnet publish . \
           --self-contained \
           -c Release \
