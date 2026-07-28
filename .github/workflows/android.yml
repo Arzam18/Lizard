@@ -86,12 +86,12 @@ jobs:
           -p:BINDINGS=HorsieBindings.so \
           -p:UseAppHost=true \
           -p:PublishSingleFile=true \
-          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:IncludeNativeLibrariesForSelfExtract=true \
+          -p:PublishTrimmed=false
 
-    - name: Verify Output File Size
+    - name: Check Total Folder Size
       run: |
-        ls -lh bin/Release/*/linux-arm64/publish/ || true
-        ls -lh bin/Release/net*/linux-arm64/publish/ || true
+        du -sh bin/Release/*/linux-arm64/publish/* || true
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
