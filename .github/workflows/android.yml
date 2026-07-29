@@ -73,14 +73,15 @@ jobs:
       run: |
         dotnet publish . \
           -c Release \
-          -r android-arm64 \
+          -r linux-bionic-arm64 \
           --self-contained true \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
           -p:UseAppHost=true \
           -p:PublishSingleFile=true \
           -p:IncludeNativeLibrariesForSelfExtract=true \
-          -p:PublishTrimmed=false
+          -p:PublishTrimmed=false \
+          -p:InvariantGlobalization=true
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
