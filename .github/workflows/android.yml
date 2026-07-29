@@ -81,7 +81,8 @@ jobs:
           -p:PublishSingleFile=true \
           -p:IncludeNativeLibrariesForSelfExtract=true \
           -p:PublishTrimmed=false \
-          -p:InvariantGlobalization=true
+          -p:InvariantGlobalization=true \
+          -p:PublishReadyToRun=false
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
