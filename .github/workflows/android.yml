@@ -78,21 +78,18 @@ jobs:
       run: |
         dotnet restore . -r linux-bionic-arm64
 
-    - name: Publish .NET Application for Android ARM64
+    - name: Publish .NET Application for Android ARM64 (NativeAOT)
       run: |
         dotnet publish . \
           -c Release \
           -r linux-bionic-arm64 \
-          --self-contained true \
           -p:AssemblyName=Lizard \
           -p:BINDINGS=HorsieBindings.so \
-          -p:UseAppHost=true \
-          -p:PublishSingleFile=true \
-          -p:IncludeNativeLibrariesForSelfExtract=true \
-          -p:PublishTrimmed=false \
-          -p:InvariantGlobalization=true \
-          -p:PublishReadyToRun=false \
-          -p:SelfContained=true
+          -p:PublishAOT=true \
+          -p:PublishSingleFile=false \
+          -p:IS_AOT=true \
+          -p:IlcInstructionSet=native \
+          -p:InvariantGlobalization=true
 
     - name: Verify publish output
       run: |
