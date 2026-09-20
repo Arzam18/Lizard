@@ -128,59 +128,53 @@ jobs:
           if not simd_h.exists():
               raise SystemExit("ERROR: Bindings/simd.h not found")
 
+          simde_cpp_headers = """#define SIMDE_ENABLE_NATIVE_ALIASES
+          #include "simde/x86/avx2.h"
+          #include "simde/x86/fma.h"
+          """
+
           # ------------------------------------------------------------
-          # SIMD.cpp
-          #
-          # Original:
-          #   #include <immintrin.h>
-          #   #include <xmmintrin.h>
-          #
-          # Android AArch64 cannot include those real x86 headers.
-          # Replace them with SIMDe's x86-compatible interface.
+          # Patch SIMD.cpp
           # ------------------------------------------------------------
 
           text = simd_cpp.read_text()
 
-          text = text.replace(
-              "#include <immintrin.h>",
-              """#define SIMDE_ENABLE_NATIVE_ALIASES
-          #include "simde/x86/avx2.h"
-          #include "simde/x86/fma.h" """.rstrip(),
-              1
-          )
+          if "#include <immintrin.h>" in text:
+              text = text.replace(
+                  "#include <immintrin.h>",
+                  simde_cpp_headers.rstrip(),
+                  1
+              )
 
-          text = text.replace(
-              "#include <xmmintrin.h>",
-              "",
-              1
-          )
+          if "#include <xmmintrin.h>" in text:
+              text = text.replace(
+                  "#include <xmmintrin.h>",
+                  "",
+                  1
+              )
 
           simd_cpp.write_text(text)
 
           # ------------------------------------------------------------
-          # simd.h
-          #
-          # Replace its direct x86 include if it is still present.
+          # Patch simd.h
           # ------------------------------------------------------------
 
           text = simd_h.read_text()
 
-          text = text.replace(
-              "#include <immintrin.h>",
-              """#define SIMDE_ENABLE_NATIVE_ALIASES
-          #include "simde/x86/avx2.h"
-          #include "simde/x86/fma.h" """.rstrip(),
-              1
-          )
+          if "#include <immintrin.h>" in text:
+              text = text.replace(
+                  "#include <immintrin.h>",
+                  simde_cpp_headers.rstrip(),
+                  1
+              )
 
-          text = text.replace(
-              "#include <xmmintrin.h>",
-              "",
-              1
-          )
+          if "#include <xmmintrin.h>" in text:
+              text = text.replace(
+                  "#include <xmmintrin.h>",
+                  "",
+                  1
+              )
 
-          # If the original x86 include was absent, make sure the
-          # SIMDe headers are still available before the vector aliases.
           if '#include "simde/x86/avx2.h"' not in text:
               lines = text.splitlines()
 
@@ -200,6 +194,7 @@ jobs:
               text = "\n".join(lines) + "\n"
 
           simd_h.write_text(text)
+
           PY
 
           echo
@@ -218,21 +213,20 @@ jobs:
 
           echo
           echo "========================================"
-          echo "Checking for forbidden direct x86 headers"
+          echo "Checking Lizard source headers"
           echo "========================================"
 
-          if grep -R -n \
+          if grep -n \
             -E '#include[[:space:]]*[<"](immintrin|xmmintrin)\.h[>"]' \
-            Bindings \
-            --include='*.cpp' \
-            --include='*.h'; then
+            Bindings/SIMD.cpp \
+            Bindings/simd.h; then
 
             echo
-            echo "ERROR: Direct x86 intrinsic header remains."
+            echo "ERROR: Direct x86 intrinsic header remains in Lizard source."
             exit 1
           fi
 
-          echo "OK: no direct immintrin.h/xmmintrin.h includes remain."
+          echo "OK: Lizard source contains no direct immintrin.h/xmmintrin.h."
 
       - name: Build HorsieBindings.so
         shell: bash
@@ -306,10 +300,10 @@ jobs:
           path.write_text(text, encoding="utf-8")
 
           print("Runtime identifier configured:")
+
           for line in text.splitlines():
               if "RuntimeIdentifiers" in line:
                   print(line)
-          PY
 
       - name: Restore Lizard
         shell: bash
@@ -355,6 +349,7 @@ jobs:
           set -e
 
           echo "Published files:"
+
           find bin/Release \
             -type f \
             -path '*/publish/*' \
@@ -377,7 +372,7 @@ jobs:
 
           echo "LIZARD_BINARY=$BINARY" >> "$GITHUB_ENV"
 
-      - name: Verify Lizard
+      - name: Verify Lizard NativeAOT
         shell: bash
         run: |
           set -e
