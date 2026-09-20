@@ -1,478 +1,97 @@
-name: Lizard Android ARM64
+name: Lizard Android Native Build
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-android:
+    name: Lizard Android Native (aarch64)
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show repository
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Repository"
-          echo "========================================"
-
-          pwd
-          git status --short
-          find Bindings -maxdepth 2 -type f | sort | head -100
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-
-      - name: Setup Android NDK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          SDK_ROOT="/usr/local/lib/android/sdk"
-          NDK_VERSION="27.2.12479018"
-          NDK="$SDK_ROOT/ndk/$NDK_VERSION"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-
-          test -d "$NDK"
-          test -x "$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
-
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "NDK=$NDK" >> "$GITHUB_ENV"
-          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
-
-          echo "NDK=$NDK"
-          "$TOOLCHAIN/bin/aarch64-linux-android24-clang++" --version
-
-      - name: Install SIMDe
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Installing SIMDe"
-          echo "========================================"
-
-          rm -rf /tmp/simde
-          git clone --depth 1 https://github.com/simd-everywhere/simde.git /tmp/simde
-
-          rm -rf Bindings/simde
-          mkdir -p Bindings
-          cp -R /tmp/simde/simde Bindings/simde
-
-          test -f Bindings/simde/x86/avx2.h
-          test -f Bindings/simde/x86/fma.h
-
-          echo "SIMDe installed successfully."
-
-      - name: Patch SIMD sources for ARM64
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Patching SIMD sources"
-          echo "========================================"
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          simd_cpp = Path("Bindings/SIMD.cpp")
-          simd_h = Path("Bindings/simd.h")
-
-          # ------------------------------------------------------------
-          # SIMD.cpp
-          # ------------------------------------------------------------
-
-          text = simd_cpp.read_text()
-
-          text = text.replace(
-              "#include <immintrin.h>",
-              '#define SIMDE_ENABLE_NATIVE_ALIASES\n'
-              '#include "simde/x86/avx2.h"\n'
-              '#include "simde/x86/fma.h"'
-          )
-
-          text = text.replace(
-              "#include <xmmintrin.h>",
-              ""
-          )
-
-          simd_cpp.write_text(text)
-
-          # ------------------------------------------------------------
-          # simd.h
-          # ------------------------------------------------------------
-
-          text = simd_h.read_text()
-
-          # Replace direct x86 headers if present.
-          text = text.replace(
-              "#include <immintrin.h>",
-              '#define SIMDE_ENABLE_NATIVE_ALIASES\n'
-              '#include "simde/x86/avx2.h"\n'
-              '#include "simde/x86/fma.h"'
-          )
-
-          text = text.replace(
-              "#include <xmmintrin.h>",
-              ""
-          )
-
-          # If the original file does not contain the x86 header anymore,
-          # make sure the SIMDe headers are still present.
-          if 'simde/x86/avx2.h' not in text:
-              marker = "#pragma once"
-              replacement = (
-                  "#pragma once\n\n"
-                  "#define SIMDE_ENABLE_NATIVE_ALIASES\n"
-                  '#include "simde/x86/avx2.h"\n'
-                  '#include "simde/x86/fma.h"'
-              )
-
-              if marker not in text:
-                  raise SystemExit(
-                      "ERROR: Could not locate #pragma once in Bindings/simd.h"
-                  )
-
-              text = text.replace(marker, replacement, 1)
-
-          simd_h.write_text(text)
-
-          # ------------------------------------------------------------
-          # Fix runtime shift.
-          #
-          # Original:
-          #   _mm256_slli_epi16(a, i)
-          #
-          # The *_slli_* intrinsic takes an immediate compile-time
-          # constant. Lizard's wrapper receives i at runtime.
-          #
-          # Use the variable-count AVX2 form instead.
-          # ------------------------------------------------------------
-
-          text = simd_h.read_text()
-
-          old = (
-              "inline vec_i16 vec_slli_epi16(const vec_i16 a, const i16 i) "
-              "{ return _mm256_slli_epi16(a, i); }"
-          )
-
-          new = (
-              "inline vec_i16 vec_slli_epi16(const vec_i16 a, const i16 i) "
-              "{ return _mm256_sll_epi16(a, _mm_cvtsi32_si128((int)i)); }"
-          )
-
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif "_mm256_slli_epi16(a, i)" in text:
-              text = text.replace(
-                  "_mm256_slli_epi16(a, i)",
-                  "_mm256_sll_epi16(a, _mm_cvtsi32_si128((int)i))",
-                  1
-              )
-          else:
-              raise SystemExit(
-                  "ERROR: Could not locate vec_slli_epi16() in Bindings/simd.h"
-              )
-
-          simd_h.write_text(text)
-
-          # ------------------------------------------------------------
-          # Fix alignas syntax in SIMD.cpp.
-          #
-          # Original:
-          #   u16 array[...] alignas(32);
-          #
-          # Correct:
-          #   alignas(32) u16 array[...];
-          # ------------------------------------------------------------
-
-          text = simd_cpp.read_text()
-
-          replacements = {
-              "u16 nnzIndices[L1_SIZE / L1_CHUNK_PER_32] alignas(32);":
-                  "alignas(32) u16 nnzIndices[L1_SIZE / L1_CHUNK_PER_32];",
-
-              "i8 FTOutputs[L1_SIZE] alignas(32);":
-                  "alignas(32) i8 FTOutputs[L1_SIZE];",
-
-              "vec_i32 L1Temp[L2_SIZE / I32_CHUNK_SIZE] alignas(32) = {};":
-                  "alignas(32) vec_i32 L1Temp[L2_SIZE / I32_CHUNK_SIZE] = {};",
-
-              "float L1Outputs[L2_SIZE] alignas(32);":
-                  "alignas(32) float L1Outputs[L2_SIZE];",
-
-              "vec_ps L2Outputs[L3_SIZE / F32_CHUNK_SIZE] alignas(32);":
-                  "alignas(32) vec_ps L2Outputs[L3_SIZE / F32_CHUNK_SIZE];",
-          }
-
-          for old, new in replacements.items():
-              if old not in text:
-                  raise SystemExit(
-                      f"ERROR: Expected declaration not found:\n{old}"
-                  )
-
-              text = text.replace(old, new, 1)
-
-          simd_cpp.write_text(text)
-
-          print("SIMD source patching completed successfully.")
-          PY
-
-      - name: Show patched SIMD headers
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Bindings/simd.h"
-          echo "========================================"
-
-          sed -n '1,120p' Bindings/simd.h
-
-          echo "========================================"
-          echo "Bindings/SIMD.cpp"
-          echo "========================================"
-
-          sed -n '1,100p' Bindings/SIMD.cpp
-
-      - name: Validate source headers
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Validating Lizard source"
-          echo "========================================"
-
-          # IMPORTANT:
-          # Do NOT scan Bindings/simde here.
-          # SIMDe itself legitimately contains conditional references
-          # to x86 headers such as immintrin.h and xmmintrin.h.
-
-          if grep -n \
-            -E '#include[[:space:]]*[<"](immintrin|xmmintrin)\.h[>"]' \
-            Bindings/SIMD.cpp \
-            Bindings/simd.h; then
-
-            echo "ERROR: Direct x86 intrinsic header remains in Lizard source."
-            exit 1
-          fi
-
-          grep -n "vec_slli_epi16" Bindings/simd.h
-          grep -n "_mm256_sll_epi16" Bindings/simd.h
-
-          echo
-          echo "Checking alignas declarations..."
-
-          grep -n "alignas(32)" Bindings/SIMD.cpp
-
-          echo
-          echo "Source validation passed."
-
-      - name: Build HorsieBindings.so
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Building HorsieBindings.so"
-          echo "========================================"
-
-          "$CXX" \
-            -std=c++20 \
-            -O3 \
-            -funroll-loops \
-            -march=armv8-a+simd \
-            -fPIC \
-            -shared \
-            -pthread \
-            -I./Bindings \
-            -I./Bindings/simde \
-            -o HorsieBindings.so \
-            ./Bindings/SIMD.cpp
-
-          file HorsieBindings.so
-          ls -lh HorsieBindings.so
-
-          file HorsieBindings.so | grep -E "ARM aarch64|AArch64|ARM64"
-
-      - name: Inspect native library
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Native library inspection"
-          echo "========================================"
-
-          readelf -h HorsieBindings.so
-          echo
-          readelf -d HorsieBindings.so || true
-
-      - name: Configure Lizard Android ARM64 runtime
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Configuring Lizard runtime"
-          echo "========================================"
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path("Lizard.csproj")
-          text = path.read_text()
-
-          if "<RuntimeIdentifiers>" not in text:
-              marker = "<TargetFramework>"
-              pos = text.find(marker)
-
-              if pos == -1:
-                  raise SystemExit(
-                      "ERROR: Could not locate TargetFramework in Lizard.csproj"
-                  )
-
-              end = text.find("</TargetFramework>", pos)
-
-              if end == -1:
-                  raise SystemExit(
-                      "ERROR: Could not locate end of TargetFramework."
-                  )
-
-              end += len("</TargetFramework>")
-
-              text = (
-                  text[:end]
-                  + "\n    <RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>"
-                  + text[end:]
-              )
-
-              path.write_text(text)
-
-          print(path.read_text())
-          PY
-
-      - name: Restore .NET
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "dotnet restore"
-          echo "========================================"
-
-          dotnet restore . \
-            -r linux-bionic-arm64
-
-      - name: Publish Lizard NativeAOT ARM64
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Publishing Lizard NativeAOT ARM64"
-          echo "========================================"
-
-          dotnet publish . \
-            -c Release \
-            -r linux-bionic-arm64 \
-            --self-contained true \
-            -p:AssemblyName=Lizard \
-            -p:BINDINGS=HorsieBindings.so \
-            -p:PublishAot=true \
-            -p:PublishSingleFile=false \
-            -p:IS_AOT=true \
-            -p:IlcInstructionSet=armv8-a \
-            -p:InvariantGlobalization=true
-
-      - name: Locate Lizard executable
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Locating Lizard"
-          echo "========================================"
-
-          find bin/Release -type f -name Lizard -print
-
-          LIZARD="$(find bin/Release -type f -name Lizard | head -1)"
-
-          if [ -z "$LIZARD" ]; then
-            echo "ERROR: Lizard executable was not produced."
-            exit 1
-          fi
-
-          echo "LIZARD=$LIZARD" >> "$GITHUB_ENV"
-
-          file "$LIZARD"
-          ls -lh "$LIZARD"
-
-      - name: Validate Lizard executable
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Validating Lizard executable"
-          echo "========================================"
-
-          file "$LIZARD"
-
-          file "$LIZARD" | grep -E "ARM aarch64|AArch64|ARM64"
-
-          if ! readelf -h "$LIZARD" | grep -q "AArch64"; then
-            echo "ERROR: Lizard is not AArch64."
-            exit 1
-          fi
-
-          echo
-          echo "Dynamic section:"
-          readelf -d "$LIZARD" || true
-
-          echo
-          echo "Checking for unexpected libhostfxr dependency..."
-
-          if readelf -d "$LIZARD" 2>/dev/null | grep -q "libhostfxr"; then
-            echo "WARNING: Lizard references libhostfxr."
-          else
-            echo "No libhostfxr dependency detected."
-          fi
-
-      - name: Prepare Android artifact
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "========================================"
-          echo "Preparing Android artifact"
-          echo "========================================"
-
-          rm -rf android-artifact
-          mkdir -p android-artifact
-
-          cp "$LIZARD" android-artifact/Lizard
-          cp HorsieBindings.so android-artifact/HorsieBindings.so
-
-          chmod +x android-artifact/Lizard
-
-          file android-artifact/Lizard
-          file android-artifact/HorsieBindings.so
-
-          ls -lh android-artifact
-
-      - name: Upload Android ARM64 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lizard-android-arm64
-          path: android-artifact/
-          if-no-files-found: error
+    - name: Clone Repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Set up Android NDK Environment
+      run: |
+        NDKV="27.2.12479018"
+        ANDROID_ROOT=/usr/local/lib/android
+        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
+        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+        echo "y" | $SDKMANAGER "ndk;$NDKV"
+        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
+        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
+        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
+    - name: Download SIMDe and Patch C++ Bindings
+      run: |
+        git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
+        mv simde-repo/simde Bindings/simde
+        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <immintrin.h>/d' {} +
+        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <xmmintrin.h>/d' {} +
+        sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
+        sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
+        sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
+        sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
+        sed -i 's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' Bindings/SIMD.cpp
+        sed -i 's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' Bindings/SIMD.cpp
+    - name: Cross-Compile C++ SIMD Bindings for Android AArch64
+      run: |
+        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+        ${{ env.TOOLCHAIN_PREFIX }}clang++ \
+          -std=c++20 \
+          -O3 \
+          -funroll-loops \
+          -march=armv8-a+simd \
+          -DSIMDE_ENABLE_NATIVE_ALIASES \
+          -DSIMDE_NO_NATIVE \
+          -I./Bindings \
+          -fPIC \
+          -shared \
+          -o HorsieBindings.so \
+          ./Bindings/SIMD.cpp \
+          -pthread
+    - name: Add RID to csproj
+      run: |
+        sed -i 's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64<\/RuntimeIdentifiers>\n    <TargetFramework>|' Lizard.csproj
+        grep -A2 "RuntimeIdentifiers" Lizard.csproj
+    - name: Restore for Android ARM64
+      run: |
+        dotnet restore . -r linux-bionic-arm64
+    - name: Publish .NET Application for Android ARM64
+      run: |
+        dotnet publish . \
+          -c Release \
+          -r linux-bionic-arm64 \
+          --self-contained true \
+          -p:AssemblyName=Lizard \
+          -p:BINDINGS=HorsieBindings.so \
+          -p:UseAppHost=true \
+          -p:PublishSingleFile=true \
+          -p:IncludeNativeLibrariesForSelfExtract=true \
+          -p:PublishTrimmed=false \
+          -p:InvariantGlobalization=true \
+          -p:PublishReadyToRun=false \
+          -p:SelfContained=true
+    - name: Verify publish output
+      run: |
+        find bin/Release -type f | head -30
+        file bin/Release/*/publish/Lizard 2>/dev/null || true
+    - name: Upload Binary Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lizard-android-native-arm64
+        path: |
+          bin/Release/**/publish/Lizard
+          bin/Release/**/publish/HorsieBindings.so
+          HorsieBindings.so
