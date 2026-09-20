@@ -1,6 +1,10 @@
 #pragma once
 
-#include <immintrin.h>
+#define SIMDE_NO_NATIVE
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#include "simde/x86/avx2.h"
+#include "simde/x86/fma.h"
+
 #include "defs.h"
 
 #if defined(AVX512) && defined(TODO_SOME_DAY)
