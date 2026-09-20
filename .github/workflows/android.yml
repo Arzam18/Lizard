@@ -31,8 +31,6 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
 
-          echo "Looking for sdkmanager..."
-
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
             -name sdkmanager \
             -type f \
@@ -44,11 +42,8 @@ jobs:
             exit 1
           fi
 
-          echo "Using:"
+          echo "Using sdkmanager:"
           echo "$SDKMANAGER"
-
-          echo
-          echo "Installing Android NDK $NDK_VERSION..."
 
           yes | "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
@@ -78,7 +73,6 @@ jobs:
           echo "ANDROID_NDK_BIN=$TOOLCHAIN/bin" >> "$GITHUB_ENV"
           echo "CXX=$CXX" >> "$GITHUB_ENV"
 
-          echo
           echo "========================================"
           echo "Android NDK"
           echo "========================================"
@@ -96,8 +90,7 @@ jobs:
           set -e
 
           if [ ! -d "Bindings/simde" ]; then
-            echo "SIMDe is not present in Bindings/simde."
-            echo "Downloading SIMDe..."
+            echo "SIMDe not found. Downloading..."
 
             git clone \
               --depth 1 \
@@ -105,43 +98,54 @@ jobs:
               /tmp/simde
 
             mkdir -p Bindings
-
-            rm -rf Bindings/simde
-
             cp -R /tmp/simde/simde Bindings/simde
           fi
 
-          echo "SIMDe:"
+          echo "SIMDe location:"
           ls -ld Bindings/simde
 
-      - name: Patch C++ bindings for Android
+      - name: Configure SIMDe for ARM64
         shell: bash
         run: |
           set -e
 
-          echo "Removing x86-only compiler includes..."
+          python3 <<'PY'
+          from pathlib import Path
 
-          find Bindings \
-            -type f \
-            \( -name '*.h' -o -name '*.cpp' \) \
-            -exec sed -i '/#include <immintrin.h>/d' {} \;
+          path = Path("Bindings/simd.h")
+          text = path.read_text()
 
-          find Bindings \
-            -type f \
-            \( -name '*.h' -o -name '*.cpp' \) \
-            -exec sed -i '/#include <xmmintrin.h>/d' {} \;
+          old = """#pragma once
 
-          echo
-          echo "Checking SIMD header..."
+          #include <immintrin.h>
+          #include "defs.h"
+          """
 
-          if [ ! -f "Bindings/simd.h" ]; then
-            echo "ERROR: Bindings/simd.h not found"
-            exit 1
-          fi
+          new = """#pragma once
 
-          echo
-          echo "SIMD header:"
-          sed -n '1,30p' Bindings/simd.h
+          #define SIMDE_NO_NATIVE
+          #define SIMDE_ENABLE_NATIVE_ALIASES
+          #include "simde/x86/avx2.h"
+          #include "simde/x86/fma.h"
+
+          #include "defs.h"
+          """
+
+          if old not in text:
+              raise SystemExit(
+                  "ERROR: Expected original simd.h header was not found."
+              )
+
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          echo "========================================"
+          echo "Android SIMD header"
+          echo "========================================"
+
+          sed -n '1,25p' Bindings/simd.h
 
       - name: Build HorsieBindings.so
         shell: bash
@@ -159,11 +163,12 @@ jobs:
             -O3 \
             -funroll-loops \
             -march=armv8-a+simd \
+            -DSIMDE_NO_NATIVE \
+            -DSIMDE_ENABLE_NATIVE_ALIASES \
             -fPIC \
             -shared \
             -pthread \
             -I./Bindings \
-            -I./Bindings/simde \
             -o HorsieBindings.so \
             ./Bindings/SIMD.cpp
 
@@ -181,6 +186,7 @@ jobs:
             | grep -E 'Class:|Machine:|Type:' || true
 
           echo
+          echo "Size:"
           ls -lh HorsieBindings.so
 
       - name: Restore .NET project
@@ -215,7 +221,7 @@ jobs:
           echo
           echo "Publish complete."
 
-      - name: Verify Lizard
+      - name: Verify Lizard NativeAOT
         shell: bash
         run: |
           set -e
@@ -233,6 +239,7 @@ jobs:
           echo "========================================"
           echo "Lizard executable"
           echo "========================================"
+
           echo "$BINARY"
 
           echo
@@ -273,7 +280,7 @@ jobs:
           echo "Size:"
           ls -lh "$BINARY"
 
-      - name: Prepare artifact
+      - name: Prepare Android artifact
         shell: bash
         run: |
           set -e
@@ -284,7 +291,7 @@ jobs:
             | head -n 1)"
 
           if [ -z "$BINARY" ]; then
-            echo "ERROR: Lizard not found."
+            echo "ERROR: Lizard executable not found."
             exit 1
           fi
 
