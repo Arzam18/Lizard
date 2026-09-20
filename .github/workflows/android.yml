@@ -27,10 +27,6 @@ jobs:
           NDK="$SDK_ROOT/ndk/$NDK_VERSION"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
-          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
             -name sdkmanager \
             -type f \
@@ -45,9 +41,6 @@ jobs:
           echo "Using sdkmanager:"
           echo "$SDKMANAGER"
 
-          echo
-          echo "Accepting Android licenses..."
-
           yes | "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
             --licenses >/dev/null 2>&1 || true
@@ -60,7 +53,7 @@ jobs:
             "ndk;$NDK_VERSION"
 
           if [ ! -d "$NDK" ]; then
-            echo "ERROR: NDK was not installed:"
+            echo "ERROR: NDK not found:"
             echo "$NDK"
             exit 1
           fi
@@ -68,11 +61,13 @@ jobs:
           CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
 
           if [ ! -x "$CXX" ]; then
-            echo "ERROR: AArch64 Android compiler not found:"
+            echo "ERROR: AArch64 compiler not found:"
             echo "$CXX"
             exit 1
           fi
 
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
@@ -91,32 +86,32 @@ jobs:
 
           "$CXX" --version
 
-      - name: Check SIMDe
+      - name: Download SIMDe
         shell: bash
         run: |
           set -e
 
-          if [ -d "Bindings/simde" ]; then
-            echo "Existing SIMDe installation found:"
-            ls -ld Bindings/simde
-          else
-            echo "SIMDe not found. Downloading..."
+          rm -rf /tmp/simde
 
-            git clone \
-              --depth 1 \
-              https://github.com/simd-everywhere/simde.git \
-              /tmp/simde
+          git clone \
+            --depth 1 \
+            https://github.com/simd-everywhere/simde.git \
+            /tmp/simde
 
-            mkdir -p Bindings
+          rm -rf Bindings/simde
 
-            cp -R /tmp/simde/simde Bindings/simde
+          mkdir -p Bindings
 
-            echo
-            echo "SIMDe installed:"
-            ls -ld Bindings/simde
-          fi
+          cp -R /tmp/simde/simde Bindings/simde
 
-      - name: Configure SIMDe for Android ARM64
+          echo
+          echo "SIMDe installed:"
+          ls -ld Bindings/simde
+
+          test -f Bindings/simde/x86/avx2.h
+          test -f Bindings/simde/x86/fma.h
+
+      - name: Patch SIMD sources for ARM64
         shell: bash
         run: |
           set -e
@@ -124,75 +119,120 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          path = Path("Bindings/simd.h")
+          simd_cpp = Path("Bindings/SIMD.cpp")
+          simd_h = Path("Bindings/simd.h")
 
-          if not path.exists():
-              raise SystemExit(
-                  "ERROR: Bindings/simd.h does not exist"
-              )
+          if not simd_cpp.exists():
+              raise SystemExit("ERROR: Bindings/SIMD.cpp not found")
 
-          text = path.read_text()
+          if not simd_h.exists():
+              raise SystemExit("ERROR: Bindings/simd.h not found")
 
-          simde_block = """#define SIMDE_ENABLE_NATIVE_ALIASES
+          # ------------------------------------------------------------
+          # SIMD.cpp
+          #
+          # Original:
+          #   #include <immintrin.h>
+          #   #include <xmmintrin.h>
+          #
+          # Android AArch64 cannot include those real x86 headers.
+          # Replace them with SIMDe's x86-compatible interface.
+          # ------------------------------------------------------------
+
+          text = simd_cpp.read_text()
+
+          text = text.replace(
+              "#include <immintrin.h>",
+              """#define SIMDE_ENABLE_NATIVE_ALIASES
           #include "simde/x86/avx2.h"
-          #include "simde/x86/fma.h"
-          """
+          #include "simde/x86/fma.h" """.rstrip(),
+              1
+          )
 
+          text = text.replace(
+              "#include <xmmintrin.h>",
+              "",
+              1
+          )
+
+          simd_cpp.write_text(text)
+
+          # ------------------------------------------------------------
+          # simd.h
+          #
+          # Replace its direct x86 include if it is still present.
+          # ------------------------------------------------------------
+
+          text = simd_h.read_text()
+
+          text = text.replace(
+              "#include <immintrin.h>",
+              """#define SIMDE_ENABLE_NATIVE_ALIASES
+          #include "simde/x86/avx2.h"
+          #include "simde/x86/fma.h" """.rstrip(),
+              1
+          )
+
+          text = text.replace(
+              "#include <xmmintrin.h>",
+              "",
+              1
+          )
+
+          # If the original x86 include was absent, make sure the
+          # SIMDe headers are still available before the vector aliases.
           if '#include "simde/x86/avx2.h"' not in text:
-              if '#include <immintrin.h>' in text:
-                  text = text.replace(
-                      '#include <immintrin.h>',
-                      simde_block.rstrip(),
-                      1
-                  )
+              lines = text.splitlines()
 
-              elif '#include <x86intrin.h>' in text:
-                  text = text.replace(
-                      '#include <x86intrin.h>',
-                      simde_block.rstrip(),
-                      1
-                  )
+              insert_at = 0
 
-              else:
-                  lines = text.splitlines()
+              if lines and lines[0].strip() == "#pragma once":
+                  insert_at = 1
 
-                  insert_at = 0
+              lines[insert_at:insert_at] = [
+                  "",
+                  "#define SIMDE_ENABLE_NATIVE_ALIASES",
+                  '#include "simde/x86/avx2.h"',
+                  '#include "simde/x86/fma.h"',
+                  "",
+              ]
 
-                  if lines and lines[0].strip() == '#pragma once':
-                      insert_at = 1
+              text = "\n".join(lines) + "\n"
 
-                  lines.insert(
-                      insert_at,
-                      '#define SIMDE_ENABLE_NATIVE_ALIASES'
-                  )
-                  lines.insert(
-                      insert_at + 1,
-                      '#include "simde/x86/avx2.h"'
-                  )
-                  lines.insert(
-                      insert_at + 2,
-                      '#include "simde/x86/fma.h"'
-                  )
-
-                  text = '\n'.join(lines) + '\n'
-
-          path.write_text(text)
+          simd_h.write_text(text)
           PY
+
+          echo
+          echo "========================================"
+          echo "Bindings/SIMD.cpp"
+          echo "========================================"
+
+          sed -n '1,20p' Bindings/SIMD.cpp
 
           echo
           echo "========================================"
           echo "Bindings/simd.h"
           echo "========================================"
 
-          sed -n '1,30p' Bindings/simd.h
+          sed -n '1,25p' Bindings/simd.h
 
           echo
-          echo "Checking SIMDe headers..."
+          echo "========================================"
+          echo "Checking for forbidden direct x86 headers"
+          echo "========================================"
 
-          test -f Bindings/simde/x86/avx2.h
-          test -f Bindings/simde/x86/fma.h
+          if grep -R -n \
+            -E '#include[[:space:]]*[<"](immintrin|xmmintrin)\.h[>"]' \
+            Bindings \
+            --include='*.cpp' \
+            --include='*.h'; then
 
-          echo "SIMDe headers found."
+            echo
+            echo "ERROR: Direct x86 intrinsic header remains."
+            exit 1
+          fi
+
+          echo "OK: no direct immintrin.h/xmmintrin.h includes remain."
 
       - name: Build HorsieBindings.so
         shell: bash
@@ -238,11 +278,45 @@ jobs:
           echo "Size:"
           ls -lh HorsieBindings.so
 
-      - name: Restore .NET project
+      - name: Add Android ARM64 RID
         shell: bash
         run: |
           set -e
 
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("Lizard.csproj")
+          text = path.read_text(encoding="utf-8-sig")
+
+          if "<RuntimeIdentifiers>" not in text:
+              marker = "<TargetFramework>"
+
+              if marker not in text:
+                  raise SystemExit(
+                      "ERROR: TargetFramework element not found."
+                  )
+
+              text = text.replace(
+                  marker,
+                  "<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>",
+                  1
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("Runtime identifier configured:")
+          for line in text.splitlines():
+              if "RuntimeIdentifiers" in line:
+                  print(line)
+          PY
+
+      - name: Restore Lizard
+        shell: bash
+        run: |
+          set -e
+
+          echo
           echo "========================================"
           echo "Restoring Lizard"
           echo "========================================"
@@ -273,17 +347,14 @@ jobs:
             -p:InvariantGlobalization=true
 
           echo
-          echo "========================================"
-          echo "Publish completed"
-          echo "========================================"
+          echo "Publish completed."
 
-      - name: Locate Lizard executable
+      - name: Locate Lizard
         shell: bash
         run: |
           set -e
 
-          echo "Searching for Lizard..."
-
+          echo "Published files:"
           find bin/Release \
             -type f \
             -path '*/publish/*' \
@@ -296,17 +367,17 @@ jobs:
 
           if [ -z "$BINARY" ]; then
             echo
-            echo "ERROR: Lizard executable was not found."
+            echo "ERROR: Lizard executable not found."
             exit 1
           fi
 
           echo
-          echo "Lizard:"
+          echo "Lizard executable:"
           echo "$BINARY"
 
           echo "LIZARD_BINARY=$BINARY" >> "$GITHUB_ENV"
 
-      - name: Verify Lizard NativeAOT
+      - name: Verify Lizard
         shell: bash
         run: |
           set -e
@@ -315,7 +386,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "LIZARD FILE"
+          echo "LIZARD"
           echo "========================================"
 
           file "$BINARY"
@@ -339,35 +410,30 @@ jobs:
 
           echo
           echo "========================================"
-          echo "CHECKING libhostfxr.so"
+          echo "CHECKING libhostfxr"
           echo "========================================"
 
           if strings "$BINARY" | grep -q 'libhostfxr.so'; then
-            echo
-            echo "WARNING:"
-            echo "libhostfxr.so reference detected."
-            echo "The executable may still be framework-dependent."
+            echo "WARNING: libhostfxr.so reference detected."
           else
-            echo
-            echo "OK:"
-            echo "No libhostfxr.so reference detected."
+            echo "OK: no libhostfxr.so reference detected."
           fi
 
           echo
           echo "========================================"
-          echo "CHECKING ARCHITECTURE"
+          echo "CHECKING AARCH64"
           echo "========================================"
 
           if file "$BINARY" | grep -qi 'ELF 64-bit.*ARM aarch64'; then
             echo "OK: AArch64 ELF confirmed."
           else
-            echo "ERROR: Lizard is not an AArch64 ELF executable."
+            echo "ERROR: output is not AArch64."
             exit 1
           fi
 
           echo
           echo "========================================"
-          echo "LIZARD SIZE"
+          echo "SIZE"
           echo "========================================"
 
           ls -lh "$BINARY"
@@ -391,7 +457,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "ANDROID ARTIFACT"
+          echo "FINAL ARTIFACT"
           echo "========================================"
 
           ls -lh android-artifact
