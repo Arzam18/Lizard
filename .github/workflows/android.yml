@@ -1,16 +1,11 @@
-name: Lizard Android Native Build
+name: Lizard Android ARM64
 
 on:
-  workflow_dispatch:
   push:
-    branches: ["main", "master"]
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
-  build-android:
-    name: Lizard Android Native (AArch64)
+  build:
     runs-on: ubuntu-24.04
 
     steps:
@@ -27,71 +22,96 @@ jobs:
         run: |
           set -e
 
-          NDKV="27.2.12479018"
-          ANDROID_ROOT="/usr/local/lib/android"
-          ANDROID_SDK_ROOT="$ANDROID_ROOT/sdk"
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          SDK_ROOT="/usr/local/lib/android/sdk"
+          NDK_VERSION="27.2.12479018"
+          NDK="$SDK_ROOT/ndk/$NDK_VERSION"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found:"
-            echo "$SDKMANAGER"
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "Looking for sdkmanager..."
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -name sdkmanager \
+            -type f \
+            | sort \
+            | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
             exit 1
           fi
 
-          echo "Installing Android NDK $NDKV..."
+          echo "Using:"
+          echo "$SDKMANAGER"
+
+          echo
+          echo "Installing Android NDK $NDK_VERSION..."
 
           yes | "$SDKMANAGER" \
-            "ndk;$NDKV" \
-            >/dev/null 2>&1 || true
+            --sdk_root="$SDK_ROOT" \
+            --licenses >/dev/null 2>&1 || true
 
-          ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDKV"
-          ANDROID_NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$SDKMANAGER" \
+            --sdk_root="$SDK_ROOT" \
+            "ndk;$NDK_VERSION"
 
-          if [ ! -d "$ANDROID_NDK_ROOT" ]; then
-            echo "ERROR: NDK was not installed:"
-            echo "$ANDROID_NDK_ROOT"
+          if [ ! -d "$NDK" ]; then
+            echo "ERROR: NDK not found:"
+            echo "$NDK"
             exit 1
           fi
 
-          if [ ! -x "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" ]; then
-            echo "ERROR: AArch64 Android compiler not found"
-            echo "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++"
+          CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
+
+          if [ ! -x "$CXX" ]; then
+            echo "ERROR: Android ARM64 compiler not found:"
+            echo "$CXX"
             exit 1
           fi
 
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> "$GITHUB_ENV"
-          echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_BIN=$TOOLCHAIN/bin" >> "$GITHUB_ENV"
+          echo "CXX=$CXX" >> "$GITHUB_ENV"
 
           echo
           echo "========================================"
           echo "Android NDK"
           echo "========================================"
-          echo "NDK:"
-          echo "$ANDROID_NDK_ROOT"
+          echo "$NDK"
           echo
           echo "Compiler:"
-          echo "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++"
+          echo "$CXX"
           echo "========================================"
 
-          "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" --version
+          "$CXX" --version
 
-      - name: Download SIMDe
+      - name: Check SIMDe
         shell: bash
         run: |
           set -e
 
-          git clone \
-            --depth 1 \
-            https://github.com/simd-everywhere/simde.git \
-            simde-repo
+          if [ ! -d "Bindings/simde" ]; then
+            echo "SIMDe is not present in Bindings/simde."
+            echo "Downloading SIMDe..."
 
-          rm -rf Bindings/simde
+            git clone \
+              --depth 1 \
+              https://github.com/simd-everywhere/simde.git \
+              /tmp/simde
 
-          mv simde-repo/simde Bindings/simde
+            mkdir -p Bindings
 
-          echo "SIMDe installed:"
+            rm -rf Bindings/simde
+
+            cp -R /tmp/simde/simde Bindings/simde
+          fi
+
+          echo "SIMDe:"
           ls -ld Bindings/simde
 
       - name: Patch C++ bindings for Android
@@ -99,120 +119,71 @@ jobs:
         run: |
           set -e
 
-          echo "Removing x86 compiler-only includes..."
+          echo "Removing x86-only compiler includes..."
 
           find Bindings \
             -type f \
-            \( -name "*.h" -o -name "*.cpp" \) \
-            -exec sed -i '/#include <immintrin.h>/d' {} +
+            \( -name '*.h' -o -name '*.cpp' \) \
+            -exec sed -i '/#include <immintrin.h>/d' {} \;
 
           find Bindings \
             -type f \
-            \( -name "*.h" -o -name "*.cpp" \) \
-            -exec sed -i '/#include <xmmintrin.h>/d' {} +
+            \( -name '*.h' -o -name '*.cpp' \) \
+            -exec sed -i '/#include <xmmintrin.h>/d' {} \;
 
           echo
-          echo "Adding SIMDe AVX2/FMA compatibility layer..."
+          echo "Checking SIMD header..."
 
-          sed -i '1i\
-#define SIMDE_NO_NATIVE\
-#define SIMDE_ENABLE_NATIVE_ALIASES\
-#include "simde/x86/avx2.h"\
-#include "simde/x86/fma.h"' \
-            Bindings/simd.h
-
-          echo
-          echo "Fixing Android alignment declarations..."
-
-          sed -i \
-            's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' \
-            Bindings/SIMD.cpp
-
-          sed -i \
-            's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' \
-            Bindings/SIMD.cpp
-
-          sed -i \
-            's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' \
-            Bindings/SIMD.cpp
-
-          sed -i \
-            's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' \
-            Bindings/SIMD.cpp
-
-          sed -i \
-            's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' \
-            Bindings/SIMD.cpp
+          if [ ! -f "Bindings/simd.h" ]; then
+            echo "ERROR: Bindings/simd.h not found"
+            exit 1
+          fi
 
           echo
           echo "SIMD header:"
-          head -20 Bindings/simd.h
+          sed -n '1,30p' Bindings/simd.h
 
-      - name: Build HorsieBindings for Android ARM64
+      - name: Build HorsieBindings.so
         shell: bash
         run: |
           set -e
 
-          export PATH="$ANDROID_NDK_BIN:$PATH"
-
-          CXX="${TOOLCHAIN_PREFIX}clang++"
+          CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
 
           echo "========================================"
           echo "Building HorsieBindings.so"
           echo "========================================"
-          echo "Compiler:"
-          echo "$CXX"
-          echo
 
           "$CXX" \
             -std=c++20 \
             -O3 \
             -funroll-loops \
             -march=armv8-a+simd \
-            -DSIMDE_ENABLE_NATIVE_ALIASES \
-            -DSIMDE_NO_NATIVE \
-            -I./Bindings \
             -fPIC \
             -shared \
+            -pthread \
+            -I./Bindings \
+            -I./Bindings/simde \
             -o HorsieBindings.so \
-            ./Bindings/SIMD.cpp \
-            -pthread
+            ./Bindings/SIMD.cpp
 
           echo
           echo "========================================"
-          echo "HorsieBindings build complete"
+          echo "HorsieBindings.so built"
           echo "========================================"
 
           file HorsieBindings.so
 
           echo
-          echo "ELF header:"
+          echo "ELF:"
           "$ANDROID_NDK_BIN/llvm-readelf" \
             -h HorsieBindings.so \
-            | grep -E "Class:|Machine:|Type:" || true
+            | grep -E 'Class:|Machine:|Type:' || true
 
           echo
-          echo "Library:"
           ls -lh HorsieBindings.so
 
-      - name: Add Android ARM64 Runtime Identifier
-        shell: bash
-        run: |
-          set -e
-
-          if grep -q "<RuntimeIdentifiers>" Lizard.csproj; then
-            echo "RuntimeIdentifiers already present."
-          else
-            sed -i \
-              's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>|' \
-              Lizard.csproj
-          fi
-
-          echo
-          echo "Runtime identifier configuration:"
-          grep -A2 -B1 "RuntimeIdentifiers" Lizard.csproj || true
-
-      - name: Restore for Android ARM64
+      - name: Restore .NET project
         shell: bash
         run: |
           set -e
@@ -226,7 +197,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "Publishing Lizard"
+          echo "Publishing Lizard NativeAOT"
           echo "========================================"
 
           dotnet publish . \
@@ -242,110 +213,16 @@ jobs:
             -p:InvariantGlobalization=true
 
           echo
-          echo "========================================"
-          echo "Publish complete"
-          echo "========================================"
+          echo "Publish complete."
 
-      - name: Verify NativeAOT output
+      - name: Verify Lizard
         shell: bash
         run: |
           set -e
 
-          echo "========================================"
-          echo "Published files"
-          echo "========================================"
-
-          find bin/Release \
-            -type f \
-            -path "*/publish/*" \
-            -ls
-
-          echo
-          echo "========================================"
-          echo "Locate Lizard executable"
-          echo "========================================"
-
           BINARY="$(find bin/Release \
             -type f \
-            -path "*/publish/Lizard" \
-            | head -n 1)"
-
-          if [ -z "$BINARY" ]; then
-            echo "ERROR: Lizard executable was not found."
-            exit 1
-          fi
-
-          echo "Lizard:"
-          echo "$BINARY"
-
-          echo
-          echo "========================================"
-          echo "File type"
-          echo "========================================"
-
-          file "$BINARY"
-
-          echo
-          echo "========================================"
-          echo "ELF header"
-          echo "========================================"
-
-          "$ANDROID_NDK_BIN/llvm-readelf" \
-            -h "$BINARY" \
-            | grep -E "Class:|Machine:|Type:" || true
-
-          echo
-          echo "========================================"
-          echo "Dynamic dependencies"
-          echo "========================================"
-
-          "$ANDROID_NDK_BIN/llvm-readelf" \
-            -d "$BINARY" || true
-
-          echo
-          echo "========================================"
-          echo "Checking libhostfxr dependency"
-          echo "========================================"
-
-          if strings "$BINARY" | grep -q "libhostfxr.so"; then
-            echo "WARNING: libhostfxr.so reference detected."
-            echo
-            echo "The executable may still be framework-dependent."
-          else
-            echo "OK: no libhostfxr.so reference detected."
-          fi
-
-          echo
-          echo "========================================"
-          echo "Checking Android AArch64"
-          echo "========================================"
-
-          if file "$BINARY" | grep -qi "ELF 64-bit.*ARM aarch64"; then
-            echo "OK: AArch64 ELF confirmed."
-          else
-            echo "ERROR: output is not an AArch64 ELF executable."
-            exit 1
-          fi
-
-          echo
-          echo "========================================"
-          echo "Final sizes"
-          echo "========================================"
-
-          ls -lh "$BINARY"
-          ls -lh HorsieBindings.so
-
-      - name: Prepare artifact directory
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf android-artifact
-          mkdir -p android-artifact
-
-          BINARY="$(find bin/Release \
-            -type f \
-            -path "*/publish/Lizard" \
+            -path '*/publish/Lizard' \
             | head -n 1)"
 
           if [ -z "$BINARY" ]; then
@@ -353,16 +230,79 @@ jobs:
             exit 1
           fi
 
+          echo "========================================"
+          echo "Lizard executable"
+          echo "========================================"
+          echo "$BINARY"
+
+          echo
+          echo "File:"
+          file "$BINARY"
+
+          echo
+          echo "ELF:"
+          "$ANDROID_NDK_BIN/llvm-readelf" \
+            -h "$BINARY" \
+            | grep -E 'Class:|Machine:|Type:' || true
+
+          echo
+          echo "Dynamic dependencies:"
+          "$ANDROID_NDK_BIN/llvm-readelf" \
+            -d "$BINARY" || true
+
+          echo
+          echo "Checking libhostfxr..."
+
+          if strings "$BINARY" | grep -q 'libhostfxr.so'; then
+            echo "WARNING: libhostfxr.so reference detected."
+          else
+            echo "OK: no libhostfxr.so reference detected."
+          fi
+
+          echo
+          echo "Checking architecture..."
+
+          if file "$BINARY" | grep -qi 'ELF 64-bit.*ARM aarch64'; then
+            echo "OK: AArch64 confirmed."
+          else
+            echo "ERROR: Lizard is not AArch64."
+            exit 1
+          fi
+
+          echo
+          echo "Size:"
+          ls -lh "$BINARY"
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -e
+
+          BINARY="$(find bin/Release \
+            -type f \
+            -path '*/publish/Lizard' \
+            | head -n 1)"
+
+          if [ -z "$BINARY" ]; then
+            echo "ERROR: Lizard not found."
+            exit 1
+          fi
+
+          rm -rf android-artifact
+          mkdir -p android-artifact
+
           cp "$BINARY" android-artifact/Lizard
           cp HorsieBindings.so android-artifact/HorsieBindings.so
 
           chmod +x android-artifact/Lizard
 
-          echo "Artifact contents:"
+          echo "========================================"
+          echo "FINAL ARTIFACT"
+          echo "========================================"
+
           ls -lh android-artifact
 
           echo
-          echo "Artifact file types:"
           file android-artifact/Lizard
           file android-artifact/HorsieBindings.so
 
