@@ -45,16 +45,22 @@ jobs:
           echo "Using sdkmanager:"
           echo "$SDKMANAGER"
 
+          echo
+          echo "Accepting Android licenses..."
+
           yes | "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
             --licenses >/dev/null 2>&1 || true
+
+          echo
+          echo "Installing Android NDK $NDK_VERSION..."
 
           "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
             "ndk;$NDK_VERSION"
 
           if [ ! -d "$NDK" ]; then
-            echo "ERROR: NDK not found:"
+            echo "ERROR: NDK was not installed:"
             echo "$NDK"
             exit 1
           fi
@@ -62,7 +68,7 @@ jobs:
           CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
 
           if [ ! -x "$CXX" ]; then
-            echo "ERROR: Android ARM64 compiler not found:"
+            echo "ERROR: AArch64 Android compiler not found:"
             echo "$CXX"
             exit 1
           fi
@@ -73,6 +79,7 @@ jobs:
           echo "ANDROID_NDK_BIN=$TOOLCHAIN/bin" >> "$GITHUB_ENV"
           echo "CXX=$CXX" >> "$GITHUB_ENV"
 
+          echo
           echo "========================================"
           echo "Android NDK"
           echo "========================================"
@@ -89,7 +96,10 @@ jobs:
         run: |
           set -e
 
-          if [ ! -d "Bindings/simde" ]; then
+          if [ -d "Bindings/simde" ]; then
+            echo "Existing SIMDe installation found:"
+            ls -ld Bindings/simde
+          else
             echo "SIMDe not found. Downloading..."
 
             git clone \
@@ -98,13 +108,15 @@ jobs:
               /tmp/simde
 
             mkdir -p Bindings
+
             cp -R /tmp/simde/simde Bindings/simde
+
+            echo
+            echo "SIMDe installed:"
+            ls -ld Bindings/simde
           fi
 
-          echo "SIMDe location:"
-          ls -ld Bindings/simde
-
-      - name: Configure SIMDe for ARM64
+      - name: Configure SIMDe for Android ARM64
         shell: bash
         run: |
           set -e
@@ -113,39 +125,74 @@ jobs:
           from pathlib import Path
 
           path = Path("Bindings/simd.h")
-          text = path.read_text()
 
-          old = """#pragma once
-
-          #include <immintrin.h>
-          #include "defs.h"
-          """
-
-          new = """#pragma once
-
-          #define SIMDE_NO_NATIVE
-          #define SIMDE_ENABLE_NATIVE_ALIASES
-          #include "simde/x86/avx2.h"
-          #include "simde/x86/fma.h"
-
-          #include "defs.h"
-          """
-
-          if old not in text:
+          if not path.exists():
               raise SystemExit(
-                  "ERROR: Expected original simd.h header was not found."
+                  "ERROR: Bindings/simd.h does not exist"
               )
 
-          text = text.replace(old, new, 1)
+          text = path.read_text()
+
+          simde_block = """#define SIMDE_ENABLE_NATIVE_ALIASES
+          #include "simde/x86/avx2.h"
+          #include "simde/x86/fma.h"
+          """
+
+          if '#include "simde/x86/avx2.h"' not in text:
+              if '#include <immintrin.h>' in text:
+                  text = text.replace(
+                      '#include <immintrin.h>',
+                      simde_block.rstrip(),
+                      1
+                  )
+
+              elif '#include <x86intrin.h>' in text:
+                  text = text.replace(
+                      '#include <x86intrin.h>',
+                      simde_block.rstrip(),
+                      1
+                  )
+
+              else:
+                  lines = text.splitlines()
+
+                  insert_at = 0
+
+                  if lines and lines[0].strip() == '#pragma once':
+                      insert_at = 1
+
+                  lines.insert(
+                      insert_at,
+                      '#define SIMDE_ENABLE_NATIVE_ALIASES'
+                  )
+                  lines.insert(
+                      insert_at + 1,
+                      '#include "simde/x86/avx2.h"'
+                  )
+                  lines.insert(
+                      insert_at + 2,
+                      '#include "simde/x86/fma.h"'
+                  )
+
+                  text = '\n'.join(lines) + '\n'
 
           path.write_text(text)
           PY
 
+          echo
           echo "========================================"
-          echo "Android SIMD header"
+          echo "Bindings/simd.h"
           echo "========================================"
 
-          sed -n '1,25p' Bindings/simd.h
+          sed -n '1,30p' Bindings/simd.h
+
+          echo
+          echo "Checking SIMDe headers..."
+
+          test -f Bindings/simde/x86/avx2.h
+          test -f Bindings/simde/x86/fma.h
+
+          echo "SIMDe headers found."
 
       - name: Build HorsieBindings.so
         shell: bash
@@ -154,6 +201,7 @@ jobs:
 
           CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
 
+          echo
           echo "========================================"
           echo "Building HorsieBindings.so"
           echo "========================================"
@@ -163,20 +211,21 @@ jobs:
             -O3 \
             -funroll-loops \
             -march=armv8-a+simd \
-            -DSIMDE_NO_NATIVE \
-            -DSIMDE_ENABLE_NATIVE_ALIASES \
             -fPIC \
             -shared \
             -pthread \
             -I./Bindings \
+            -I./Bindings/simde \
             -o HorsieBindings.so \
             ./Bindings/SIMD.cpp
 
           echo
           echo "========================================"
-          echo "HorsieBindings.so built"
+          echo "HorsieBindings.so BUILD SUCCESS"
           echo "========================================"
 
+          echo
+          echo "File:"
           file HorsieBindings.so
 
           echo
@@ -194,6 +243,10 @@ jobs:
         run: |
           set -e
 
+          echo "========================================"
+          echo "Restoring Lizard"
+          echo "========================================"
+
           dotnet restore . \
             -r linux-bionic-arm64
 
@@ -202,8 +255,9 @@ jobs:
         run: |
           set -e
 
+          echo
           echo "========================================"
-          echo "Publishing Lizard NativeAOT"
+          echo "Publishing Lizard NativeAOT ARM64"
           echo "========================================"
 
           dotnet publish . \
@@ -219,12 +273,21 @@ jobs:
             -p:InvariantGlobalization=true
 
           echo
-          echo "Publish complete."
+          echo "========================================"
+          echo "Publish completed"
+          echo "========================================"
 
-      - name: Verify Lizard NativeAOT
+      - name: Locate Lizard executable
         shell: bash
         run: |
           set -e
+
+          echo "Searching for Lizard..."
+
+          find bin/Release \
+            -type f \
+            -path '*/publish/*' \
+            -print
 
           BINARY="$(find bin/Release \
             -type f \
@@ -232,52 +295,81 @@ jobs:
             | head -n 1)"
 
           if [ -z "$BINARY" ]; then
-            echo "ERROR: Lizard executable not found."
+            echo
+            echo "ERROR: Lizard executable was not found."
             exit 1
           fi
 
-          echo "========================================"
-          echo "Lizard executable"
-          echo "========================================"
-
+          echo
+          echo "Lizard:"
           echo "$BINARY"
 
+          echo "LIZARD_BINARY=$BINARY" >> "$GITHUB_ENV"
+
+      - name: Verify Lizard NativeAOT
+        shell: bash
+        run: |
+          set -e
+
+          BINARY="$LIZARD_BINARY"
+
           echo
-          echo "File:"
+          echo "========================================"
+          echo "LIZARD FILE"
+          echo "========================================"
+
           file "$BINARY"
 
           echo
-          echo "ELF:"
+          echo "========================================"
+          echo "ELF HEADER"
+          echo "========================================"
+
           "$ANDROID_NDK_BIN/llvm-readelf" \
             -h "$BINARY" \
             | grep -E 'Class:|Machine:|Type:' || true
 
           echo
-          echo "Dynamic dependencies:"
+          echo "========================================"
+          echo "DYNAMIC DEPENDENCIES"
+          echo "========================================"
+
           "$ANDROID_NDK_BIN/llvm-readelf" \
             -d "$BINARY" || true
 
           echo
-          echo "Checking libhostfxr..."
+          echo "========================================"
+          echo "CHECKING libhostfxr.so"
+          echo "========================================"
 
           if strings "$BINARY" | grep -q 'libhostfxr.so'; then
-            echo "WARNING: libhostfxr.so reference detected."
+            echo
+            echo "WARNING:"
+            echo "libhostfxr.so reference detected."
+            echo "The executable may still be framework-dependent."
           else
-            echo "OK: no libhostfxr.so reference detected."
+            echo
+            echo "OK:"
+            echo "No libhostfxr.so reference detected."
           fi
 
           echo
-          echo "Checking architecture..."
+          echo "========================================"
+          echo "CHECKING ARCHITECTURE"
+          echo "========================================"
 
           if file "$BINARY" | grep -qi 'ELF 64-bit.*ARM aarch64'; then
-            echo "OK: AArch64 confirmed."
+            echo "OK: AArch64 ELF confirmed."
           else
-            echo "ERROR: Lizard is not AArch64."
+            echo "ERROR: Lizard is not an AArch64 ELF executable."
             exit 1
           fi
 
           echo
-          echo "Size:"
+          echo "========================================"
+          echo "LIZARD SIZE"
+          echo "========================================"
+
           ls -lh "$BINARY"
 
       - name: Prepare Android artifact
@@ -285,32 +377,31 @@ jobs:
         run: |
           set -e
 
-          BINARY="$(find bin/Release \
-            -type f \
-            -path '*/publish/Lizard' \
-            | head -n 1)"
-
-          if [ -z "$BINARY" ]; then
-            echo "ERROR: Lizard executable not found."
-            exit 1
-          fi
-
           rm -rf android-artifact
           mkdir -p android-artifact
 
-          cp "$BINARY" android-artifact/Lizard
-          cp HorsieBindings.so android-artifact/HorsieBindings.so
+          cp "$LIZARD_BINARY" \
+            android-artifact/Lizard
 
-          chmod +x android-artifact/Lizard
+          cp HorsieBindings.so \
+            android-artifact/HorsieBindings.so
 
+          chmod +x \
+            android-artifact/Lizard
+
+          echo
           echo "========================================"
-          echo "FINAL ARTIFACT"
+          echo "ANDROID ARTIFACT"
           echo "========================================"
 
           ls -lh android-artifact
 
           echo
+          echo "Lizard:"
           file android-artifact/Lizard
+
+          echo
+          echo "HorsieBindings:"
           file android-artifact/HorsieBindings.so
 
       - name: Upload Android ARM64 engine
