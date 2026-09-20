@@ -3,104 +3,372 @@ name: Lizard Android Native Build
 on:
   workflow_dispatch:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
 
 permissions:
   contents: write
 
 jobs:
   build-android:
-    name: Lizard Android Native (aarch64)
+    name: Lizard Android Native (AArch64)
     runs-on: ubuntu-24.04
 
     steps:
-    - name: Clone Repository
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '9.0.x'
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
-    - name: Set up Android NDK Environment
-      run: |
-        NDKV="27.2.12479018"
-        ANDROID_ROOT=/usr/local/lib/android
-        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
-        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
-        echo "y" | $SDKMANAGER "ndk;$NDKV"
-        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
-        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+      - name: Setup Android NDK
+        shell: bash
+        run: |
+          set -e
 
-        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
-        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
+          NDKV="27.2.12479018"
+          ANDROID_ROOT="/usr/local/lib/android"
+          ANDROID_SDK_ROOT="$ANDROID_ROOT/sdk"
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
-    - name: Download SIMDe and Patch C++ Bindings
-      run: |
-        git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
-        mv simde-repo/simde Bindings/simde
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found:"
+            echo "$SDKMANAGER"
+            exit 1
+          fi
 
-        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <immintrin.h>/d' {} +
-        find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i '/#include <xmmintrin.h>/d' {} +
+          echo "Installing Android NDK $NDKV..."
 
-        sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
+          yes | "$SDKMANAGER" \
+            "ndk;$NDKV" \
+            >/dev/null 2>&1 || true
 
-        sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
-        sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
-        sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
-        sed -i 's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' Bindings/SIMD.cpp
-        sed -i 's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' Bindings/SIMD.cpp
+          ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDKV"
+          ANDROID_NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-    - name: Cross-Compile C++ SIMD Bindings for Android AArch64
-      run: |
-        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+          if [ ! -d "$ANDROID_NDK_ROOT" ]; then
+            echo "ERROR: NDK was not installed:"
+            echo "$ANDROID_NDK_ROOT"
+            exit 1
+          fi
 
-        ${{ env.TOOLCHAIN_PREFIX }}clang++ \
-          -std=c++20 \
-          -O3 \
-          -funroll-loops \
-          -march=armv8-a+simd \
-          -DSIMDE_ENABLE_NATIVE_ALIASES \
-          -DSIMDE_NO_NATIVE \
-          -I./Bindings \
-          -fPIC \
-          -shared \
-          -o HorsieBindings.so \
-          ./Bindings/SIMD.cpp \
-          -pthread
+          if [ ! -x "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" ]; then
+            echo "ERROR: AArch64 Android compiler not found"
+            echo "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++"
+            exit 1
+          fi
 
-    - name: Add RID to csproj
-      run: |
-        sed -i 's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64<\/RuntimeIdentifiers>\n    <TargetFramework>|' Lizard.csproj
-        grep -A2 "RuntimeIdentifiers" Lizard.csproj
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> "$GITHUB_ENV"
 
-    - name: Restore for Android ARM64
-      run: |
-        dotnet restore . -r linux-bionic-arm64
+          echo
+          echo "========================================"
+          echo "Android NDK"
+          echo "========================================"
+          echo "NDK:"
+          echo "$ANDROID_NDK_ROOT"
+          echo
+          echo "Compiler:"
+          echo "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++"
+          echo "========================================"
 
-    - name: Publish .NET Application for Android ARM64 (NativeAOT)
-      run: |
-        dotnet publish . \
-          -c Release \
-          -r linux-bionic-arm64 \
-          -p:AssemblyName=Lizard \
-          -p:BINDINGS=HorsieBindings.so \
-          -p:PublishAOT=true \
-          -p:PublishSingleFile=false \
-          -p:IS_AOT=true \
-          -p:IlcInstructionSet=native \
-          -p:InvariantGlobalization=true
+          "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" --version
 
-    - name: Verify publish output
-      run: |
-        find bin/Release -type f | head -30
-        file bin/Release/*/publish/Lizard 2>/dev/null || true
+      - name: Download SIMDe
+        shell: bash
+        run: |
+          set -e
 
-    - name: Upload Binary Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: lizard-android-native-arm64
-        path: |
-          bin/Release/**/publish/Lizard
-          bin/Release/**/publish/HorsieBindings.so
-          HorsieBindings.so
+          git clone \
+            --depth 1 \
+            https://github.com/simd-everywhere/simde.git \
+            simde-repo
+
+          rm -rf Bindings/simde
+
+          mv simde-repo/simde Bindings/simde
+
+          echo "SIMDe installed:"
+          ls -ld Bindings/simde
+
+      - name: Patch C++ bindings for Android
+        shell: bash
+        run: |
+          set -e
+
+          echo "Removing x86 compiler-only includes..."
+
+          find Bindings \
+            -type f \
+            \( -name "*.h" -o -name "*.cpp" \) \
+            -exec sed -i '/#include <immintrin.h>/d' {} +
+
+          find Bindings \
+            -type f \
+            \( -name "*.h" -o -name "*.cpp" \) \
+            -exec sed -i '/#include <xmmintrin.h>/d' {} +
+
+          echo
+          echo "Adding SIMDe AVX2/FMA compatibility layer..."
+
+          sed -i '1i\
+#define SIMDE_NO_NATIVE\
+#define SIMDE_ENABLE_NATIVE_ALIASES\
+#include "simde/x86/avx2.h"\
+#include "simde/x86/fma.h"' \
+            Bindings/simd.h
+
+          echo
+          echo "Fixing Android alignment declarations..."
+
+          sed -i \
+            's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' \
+            Bindings/SIMD.cpp
+
+          sed -i \
+            's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' \
+            Bindings/SIMD.cpp
+
+          sed -i \
+            's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' \
+            Bindings/SIMD.cpp
+
+          sed -i \
+            's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' \
+            Bindings/SIMD.cpp
+
+          sed -i \
+            's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' \
+            Bindings/SIMD.cpp
+
+          echo
+          echo "SIMD header:"
+          head -20 Bindings/simd.h
+
+      - name: Build HorsieBindings for Android ARM64
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$ANDROID_NDK_BIN:$PATH"
+
+          CXX="${TOOLCHAIN_PREFIX}clang++"
+
+          echo "========================================"
+          echo "Building HorsieBindings.so"
+          echo "========================================"
+          echo "Compiler:"
+          echo "$CXX"
+          echo
+
+          "$CXX" \
+            -std=c++20 \
+            -O3 \
+            -funroll-loops \
+            -march=armv8-a+simd \
+            -DSIMDE_ENABLE_NATIVE_ALIASES \
+            -DSIMDE_NO_NATIVE \
+            -I./Bindings \
+            -fPIC \
+            -shared \
+            -o HorsieBindings.so \
+            ./Bindings/SIMD.cpp \
+            -pthread
+
+          echo
+          echo "========================================"
+          echo "HorsieBindings build complete"
+          echo "========================================"
+
+          file HorsieBindings.so
+
+          echo
+          echo "ELF header:"
+          "$ANDROID_NDK_BIN/llvm-readelf" \
+            -h HorsieBindings.so \
+            | grep -E "Class:|Machine:|Type:" || true
+
+          echo
+          echo "Library:"
+          ls -lh HorsieBindings.so
+
+      - name: Add Android ARM64 Runtime Identifier
+        shell: bash
+        run: |
+          set -e
+
+          if grep -q "<RuntimeIdentifiers>" Lizard.csproj; then
+            echo "RuntimeIdentifiers already present."
+          else
+            sed -i \
+              's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>|' \
+              Lizard.csproj
+          fi
+
+          echo
+          echo "Runtime identifier configuration:"
+          grep -A2 -B1 "RuntimeIdentifiers" Lizard.csproj || true
+
+      - name: Restore for Android ARM64
+        shell: bash
+        run: |
+          set -e
+
+          dotnet restore . \
+            -r linux-bionic-arm64
+
+      - name: Publish Lizard NativeAOT ARM64
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Publishing Lizard"
+          echo "========================================"
+
+          dotnet publish . \
+            -c Release \
+            -r linux-bionic-arm64 \
+            --self-contained true \
+            -p:AssemblyName=Lizard \
+            -p:BINDINGS=HorsieBindings.so \
+            -p:PublishAot=true \
+            -p:PublishSingleFile=false \
+            -p:IS_AOT=true \
+            -p:IlcInstructionSet=armv8-a \
+            -p:InvariantGlobalization=true
+
+          echo
+          echo "========================================"
+          echo "Publish complete"
+          echo "========================================"
+
+      - name: Verify NativeAOT output
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Published files"
+          echo "========================================"
+
+          find bin/Release \
+            -type f \
+            -path "*/publish/*" \
+            -ls
+
+          echo
+          echo "========================================"
+          echo "Locate Lizard executable"
+          echo "========================================"
+
+          BINARY="$(find bin/Release \
+            -type f \
+            -path "*/publish/Lizard" \
+            | head -n 1)"
+
+          if [ -z "$BINARY" ]; then
+            echo "ERROR: Lizard executable was not found."
+            exit 1
+          fi
+
+          echo "Lizard:"
+          echo "$BINARY"
+
+          echo
+          echo "========================================"
+          echo "File type"
+          echo "========================================"
+
+          file "$BINARY"
+
+          echo
+          echo "========================================"
+          echo "ELF header"
+          echo "========================================"
+
+          "$ANDROID_NDK_BIN/llvm-readelf" \
+            -h "$BINARY" \
+            | grep -E "Class:|Machine:|Type:" || true
+
+          echo
+          echo "========================================"
+          echo "Dynamic dependencies"
+          echo "========================================"
+
+          "$ANDROID_NDK_BIN/llvm-readelf" \
+            -d "$BINARY" || true
+
+          echo
+          echo "========================================"
+          echo "Checking libhostfxr dependency"
+          echo "========================================"
+
+          if strings "$BINARY" | grep -q "libhostfxr.so"; then
+            echo "WARNING: libhostfxr.so reference detected."
+            echo
+            echo "The executable may still be framework-dependent."
+          else
+            echo "OK: no libhostfxr.so reference detected."
+          fi
+
+          echo
+          echo "========================================"
+          echo "Checking Android AArch64"
+          echo "========================================"
+
+          if file "$BINARY" | grep -qi "ELF 64-bit.*ARM aarch64"; then
+            echo "OK: AArch64 ELF confirmed."
+          else
+            echo "ERROR: output is not an AArch64 ELF executable."
+            exit 1
+          fi
+
+          echo
+          echo "========================================"
+          echo "Final sizes"
+          echo "========================================"
+
+          ls -lh "$BINARY"
+          ls -lh HorsieBindings.so
+
+      - name: Prepare artifact directory
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf android-artifact
+          mkdir -p android-artifact
+
+          BINARY="$(find bin/Release \
+            -type f \
+            -path "*/publish/Lizard" \
+            | head -n 1)"
+
+          if [ -z "$BINARY" ]; then
+            echo "ERROR: Lizard executable not found."
+            exit 1
+          fi
+
+          cp "$BINARY" android-artifact/Lizard
+          cp HorsieBindings.so android-artifact/HorsieBindings.so
+
+          chmod +x android-artifact/Lizard
+
+          echo "Artifact contents:"
+          ls -lh android-artifact
+
+          echo
+          echo "Artifact file types:"
+          file android-artifact/Lizard
+          file android-artifact/HorsieBindings.so
+
+      - name: Upload Android ARM64 engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: lizard-android-arm64
+          path: android-artifact/
+          if-no-files-found: error
