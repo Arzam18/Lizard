@@ -49,7 +49,7 @@ jobs:
           echo "ANDROID_NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
           echo "$NDK_BIN" >> "$GITHUB_PATH"
 
-      - name: Prepare SIMDe and Patch SIMD Source
+      - name: Prepare SIMDe
         shell: bash
         run: |
           set -euo pipefail
@@ -57,37 +57,71 @@ jobs:
           test -f Bindings/SIMD.cpp
           test -f Bindings/simd.h
 
-          mkdir -p Bindings/simde
-
           if [ ! -f Bindings/simde/x86/avx2.h ]; then
             git clone --depth 1 \
               https://github.com/simd-everywhere/simde.git \
               /tmp/simde-repo
 
+            mkdir -p Bindings/simde
             cp -a /tmp/simde-repo/simde/. Bindings/simde/
           fi
 
-          # Remove x86-only headers from the binding source.
-          # simd.h already includes SIMDe's AVX2 and FMA compatibility headers.
-          find Bindings -type f \
-            \( -name "*.cpp" -o -name "*.h" \) \
-            -exec sed -i -E \
-              '/^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]immintrin\.h[>"]/d;
-               /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]xmmintrin\.h[>"]/d' {} +
+          echo "SIMDe headers are ready."
 
-          echo "Checking for remaining x86-only header includes:"
-          if grep -R -n -E \
-            '#[[:space:]]*include[[:space:]]*[<"](immintrin|xmmintrin)\.h[>"]' \
-            Bindings; then
-            echo "::error::An x86-only intrinsic header remains."
+      - name: Patch ARM64 SIMD Source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("Bindings/SIMD.cpp")
+          source = path.read_text()
+
+          pattern = re.compile(
+              r'^(\s*)'
+              r'(u16 nnzIndices\[[^\]]+\]|'
+              r'i8 FTOutputs\[[^\]]+\]|'
+              r'vec_i32 L1Temp\[[^\]]+\]|'
+              r'float L1Outputs\[[^\]]+\]|'
+              r'vec_ps L2Outputs\[[^\]]+\])'
+              r'\s+alignas\(32\)'
+              r'(\s*=\s*\{\})?;',
+              re.MULTILINE
+          )
+
+          source, count = pattern.subn(
+              lambda m: f"{m.group(1)}alignas(32) "
+                        f"{m.group(2)}{m.group(3) or ''};",
+              source
+          )
+
+          if count != 5:
+              print(f"Expected to patch 5 alignment declarations; patched {count}.")
+              print("Current matching declarations:")
+              for number, line in enumerate(source.splitlines(), 1):
+                  if "alignas(32)" in line:
+                      print(f"{number}: {line}")
+              raise SystemExit(
+                  "Source layout differs from the expected version; refusing to continue."
+              )
+
+          path.write_text(source)
+          print("Patched all five alignment declarations.")
+
+          for line in source.splitlines():
+              if "alignas(32)" in line:
+                  print(line)
+          PY
+
+          if grep -nE \
+            'nnzIndices.*alignas|FTOutputs.*alignas|L1Temp.*alignas|L1Outputs.*alignas|L2Outputs.*alignas' \
+            Bindings/SIMD.cpp; then
+            echo "::error::Alignment declarations remain in the old format."
             exit 1
           fi
-
-          echo "SIMDe headers:"
-          test -f Bindings/simde/x86/avx2.h
-          test -f Bindings/simde/x86/fma.h
-
-          echo "SIMD source preparation completed."
 
       - name: Compile Android ARM64 SIMD Bindings
         shell: bash
@@ -111,7 +145,7 @@ jobs:
           file HorsieBindings.so
           readelf -h HorsieBindings.so | grep -E 'Class:|Machine:'
 
-      - name: Configure Android Runtime Identifier
+      - name: Configure Runtime Identifier
         shell: bash
         run: |
           set -euo pipefail
@@ -122,8 +156,9 @@ jobs:
               Lizard.csproj
           fi
 
+          echo "Project publishing properties:"
           grep -nE \
-            'TargetFramework|RuntimeIdentifiers|PublishAot|PublishSingleFile' \
+            'TargetFramework|RuntimeIdentifier|PublishAot|PublishSingleFile' \
             Lizard.csproj || true
 
       - name: Restore Dependencies
@@ -152,7 +187,7 @@ jobs:
             -p:StripSymbols=false \
             -p:BINDINGS=HorsieBindings.so
 
-      - name: Verify Native Executable
+      - name: Verify Native Output
         shell: bash
         run: |
           set -euo pipefail
@@ -172,7 +207,7 @@ jobs:
           readelf -l "$BIN" | grep -i interpreter || true
 
           if ! readelf -h "$BIN" | grep -q 'AArch64'; then
-            echo "::error::Executable is not ARM64."
+            echo "::error::Output is not an AArch64 executable."
             exit 1
           fi
 
@@ -180,7 +215,6 @@ jobs:
           install -m 755 "$BIN" artifacts/Lizard
           install -m 644 HorsieBindings.so artifacts/HorsieBindings.so
 
-          echo "Artifact files:"
           ls -lah artifacts
 
       - name: Upload Android ARM64 Artifact
