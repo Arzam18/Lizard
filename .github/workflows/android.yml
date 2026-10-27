@@ -83,7 +83,6 @@ jobs:
             -p:UseAppHost=true \
             -p:IS_AOT=true \
             -p:InvariantGlobalization=true \
-            -p:PublishTrimmed=false \
             -p:PublishReadyToRun=false \
             -p:StripSymbols=false
 
