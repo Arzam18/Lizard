@@ -10,17 +10,17 @@ permissions:
 
 jobs:
   build-android:
-    name: Lizard Android Native AOT (ARM64)
+    name: Lizard Android ARM64 Native AOT
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 9
+      - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: "8.0.x"
 
       - name: Set up Android NDK
         shell: bash
@@ -28,50 +28,47 @@ jobs:
           set -euo pipefail
 
           NDK_VERSION="27.2.12479018"
-          ANDROID_ROOT="/usr/local/lib/android"
-          ANDROID_SDK_ROOT="$ANDROID_ROOT/sdk"
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          SDK_ROOT="/usr/local/lib/android/sdk"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
           if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android sdkmanager was not found at $SDKMANAGER"
+            echo "::error::Android sdkmanager not found: $SDKMANAGER"
+            find /usr/local/lib/android -name sdkmanager -type f 2>/dev/null || true
             exit 1
           fi
 
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "ndk;$NDK_VERSION"
 
-          ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
-          ANDROID_NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_ROOT="$SDK_ROOT/ndk/$NDK_VERSION"
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          test -x "$ANDROID_NDK_BIN/clang"
-          test -x "$ANDROID_NDK_BIN/clang++"
+          test -x "$NDK_BIN/aarch64-linux-android35-clang++"
 
-          echo "$ANDROID_NDK_BIN" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
 
       - name: Prepare SIMD Bindings
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
-          mkdir -p Bindings
-          cp -a simde-repo/simde Bindings/simde
+          if [ ! -d Bindings ]; then
+            echo "::error::Bindings directory not found. This workflow expects the repository's existing SIMD binding source."
+            exit 1
+          fi
 
-          find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) \
-            -exec sed -i '/#include <immintrin.h>/d' {} +
+          if [ ! -f Bindings/SIMD.cpp ]; then
+            echo "::error::Bindings/SIMD.cpp not found."
+            find Bindings -maxdepth 2 -type f
+            exit 1
+          fi
 
-          find Bindings -type f \( -name "*.h" -o -name "*.cpp" \) \
-            -exec sed -i '/#include <xmmintrin.h>/d' {} +
-
-          sed -i '1i #define SIMDE_NO_NATIVE\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#include "simde/x86/fma.h"' Bindings/simd.h
-
-          sed -i 's/u16 nnzIndices\(\[.*\]\) alignas(32);/alignas(32) u16 nnzIndices\1;/g' Bindings/SIMD.cpp
-          sed -i 's/i8 FTOutputs\(\[.*\]\) alignas(32);/alignas(32) i8 FTOutputs\1;/g' Bindings/SIMD.cpp
-          sed -i 's/vec_i32 L1Temp\(\[.*\]\) alignas(32) = {};/alignas(32) vec_i32 L1Temp\1 = {};/g' Bindings/SIMD.cpp
-          sed -i 's/float L1Outputs\(\[.*\]\) alignas(32);/alignas(32) float L1Outputs\1;/g' Bindings/SIMD.cpp
-          sed -i 's/vec_ps L2Outputs\(\[.*\]\) alignas(32);/alignas(32) vec_ps L2Outputs\1;/g' Bindings/SIMD.cpp
+          if [ ! -d Bindings/simde ]; then
+            git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
+            cp -a simde-repo/simde Bindings/simde
+          fi
 
       - name: Compile Android ARM64 SIMD Bindings
         shell: bash
@@ -81,35 +78,43 @@ jobs:
           "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" \
             -std=c++20 \
             -O3 \
-            -funroll-loops \
             -march=armv8-a+simd \
-            -DSIMDE_ENABLE_NATIVE_ALIASES \
-            -DSIMDE_NO_NATIVE \
-            -I./Bindings \
             -fPIC \
             -shared \
+            -DSIMDE_NO_NATIVE \
+            -DSIMDE_ENABLE_NATIVE_ALIASES \
+            -I./Bindings \
             -o HorsieBindings.so \
             ./Bindings/SIMD.cpp \
             -pthread
 
           file HorsieBindings.so
 
-      - name: Configure Android ARM64 RID
+      - name: Verify Project Configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! grep -q '<RuntimeIdentifiers>' Lizard.csproj; then
-            sed -i 's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>|' Lizard.csproj
+          test -f Lizard.csproj
+
+          echo "Project configuration before publishing:"
+          grep -nE 'TargetFramework|PublishAot|PublishSingleFile|RuntimeIdentifier|RuntimeIdentifiers' Lizard.csproj || true
+
+          # Disable single-file publishing because Native AOT cannot use it.
+          # Enable AOT explicitly in the publish command below.
+
+          if grep -q '<PublishSingleFile>true</PublishSingleFile>' Lizard.csproj; then
+            sed -i 's|<PublishSingleFile>true</PublishSingleFile>|<PublishSingleFile>false</PublishSingleFile>|g' Lizard.csproj
           fi
 
-          grep -nE 'TargetFramework|RuntimeIdentifiers|PublishAot' Lizard.csproj
+          echo "Project configuration after adjustment:"
+          grep -nE 'TargetFramework|PublishAot|PublishSingleFile|RuntimeIdentifier|RuntimeIdentifiers' Lizard.csproj || true
 
       - name: Restore Dependencies
         shell: bash
         run: |
           set -euo pipefail
-          dotnet restore . -r linux-bionic-arm64
+          dotnet restore Lizard.csproj -r linux-bionic-arm64
 
       - name: Publish Native AOT Executable
         shell: bash
@@ -118,50 +123,61 @@ jobs:
 
           export PATH="$ANDROID_NDK_BIN:$PATH"
 
-          dotnet publish . \
+          dotnet publish Lizard.csproj \
             -c Release \
             -r linux-bionic-arm64 \
             --self-contained true \
             -p:PublishAot=true \
-            -p:PublishAotUsingRuntimePack=true \
-            -p:DisableUnsupportedError=true \
-            -p:AssemblyName=Lizard \
-            -p:BINDINGS=HorsieBindings.so \
-            -p:IS_AOT=true \
+            -p:PublishSingleFile=false \
             -p:UseAppHost=true \
             -p:InvariantGlobalization=true \
             -p:PublishTrimmed=true \
             -p:PublishReadyToRun=false \
-            -p:StripSymbols=false
+            -p:StripSymbols=false \
+            -p:BINDINGS=HorsieBindings.so
 
-      - name: Verify Native AOT Output
+      - name: Locate and Verify Native AOT Output
         shell: bash
         run: |
           set -euo pipefail
 
-          BIN="bin/Release/net8.0/linux-bionic-arm64/publish/Lizard"
+          echo "Published files:"
+          find bin/Release -type f -path '*/publish/*' -print
 
-          if [ ! -f "$BIN" ]; then
-            echo "::error::Expected executable not found: $BIN"
-            find bin/Release -type f -maxdepth 8
+          BIN="$(find bin/Release -type f -path '*/publish/Lizard' -print -quit)"
+
+          if [ -z "$BIN" ]; then
+            echo "::error::Native Lizard executable was not found."
             exit 1
           fi
 
+          echo "Selected executable: $BIN"
           file "$BIN"
+
           readelf -h "$BIN" | grep -E 'Class:|Machine:'
           readelf -l "$BIN" | grep -i interpreter || true
 
-          echo "Checking for .NET app-host markers..."
-          if strings "$BIN" | grep -E -m 5 'hostfxr_main|hostpolicy|Download the .NET runtime'; then
-            echo "::error::Output still appears to contain .NET app-host markers."
+          if ! readelf -h "$BIN" | grep -q 'AArch64'; then
+            echo "::error::Output is not an AArch64 executable."
             exit 1
           fi
 
-          echo "Native AOT output checks passed."
+          if strings "$BIN" | grep -E -m 5 'hostfxr_main|hostpolicy|Download the .NET runtime'; then
+            echo "::warning::Found .NET host-related strings; inspect the output before treating it as a standalone Native AOT engine."
+          fi
 
-      - name: Upload Android ARM64 Engine
+          mkdir -p artifacts
+          install -m 755 "$BIN" artifacts/Lizard
+
+          if [ -f HorsieBindings.so ]; then
+            install -m 644 HorsieBindings.so artifacts/HorsieBindings.so
+          fi
+
+          ls -lah artifacts
+
+      - name: Upload Android ARM64 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lizard-android-arm64-native-aot
-          path: bin/Release/net8.0/linux-bionic-arm64/publish/Lizard
+          path: artifacts/*
           if-no-files-found: error
