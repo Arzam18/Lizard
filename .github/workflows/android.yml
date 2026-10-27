@@ -83,6 +83,7 @@ jobs:
             -p:PublishAot=true \
             -p:PublishAotUsingRuntimePack=true \
             -p:DisableUnsupportedError=true \
+            -p:IlcInstructionSet=armv8.0-a \
             -p:PublishSingleFile=false \
             -p:UseAppHost=true \
             -p:IS_AOT=true \
