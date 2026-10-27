@@ -59,7 +59,7 @@ jobs:
           grep -n 'AdvSimd' Logic/NN/NNUE.cs
 
           echo "Native Horsie bindings are disabled."
-          echo "Using Lizard's managed ARM SIMD implementation."
+          echo "Using the managed ARM SIMD implementation."
 
       - name: Restore Dependencies
         shell: bash
@@ -83,7 +83,7 @@ jobs:
             -p:PublishAot=true \
             -p:PublishAotUsingRuntimePack=true \
             -p:DisableUnsupportedError=true \
-            -p:IlcInstructionSet=armv8.0-a \
+            -p:IlcInstructionSet=base \
             -p:PublishSingleFile=false \
             -p:UseAppHost=true \
             -p:IS_AOT=true \
@@ -121,13 +121,11 @@ jobs:
           echo "Dynamic dependencies:"
           readelf -d "$BIN" | grep NEEDED || true
 
-          echo "Checking for .NET host markers:"
-          strings "$BIN" | grep -im 5 -E \
-            'hostfxr_main|hostpolicy|Download the .NET runtime' || true
-
           mkdir -p artifacts
           install -m 755 "$BIN" artifacts/Lizard
-          ls -lah artifacts
+
+          echo "Final artifact:"
+          ls -lh artifacts/Lizard
 
       - name: Upload Android ARM64 Artifact
         uses: actions/upload-artifact@v4
