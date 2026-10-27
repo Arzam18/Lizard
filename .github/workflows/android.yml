@@ -58,16 +58,18 @@ jobs:
 
           grep -n 'AdvSimd' Logic/NN/NNUE.cs
 
-          echo "Native Horsie bindings will not be compiled."
-          echo "Lizard will use its built-in C# ARM SIMD path."
+          echo "Native Horsie bindings are disabled."
+          echo "Using Lizard's managed ARM SIMD implementation."
 
       - name: Restore Dependencies
         shell: bash
         run: |
           set -euo pipefail
-          dotnet restore Lizard.csproj -r linux-bionic-arm64
 
-      - name: Publish Native AOT Executable
+          dotnet restore Lizard.csproj \
+            -r linux-bionic-arm64
+
+      - name: Publish ARM64 Native AOT Executable
         shell: bash
         run: |
           set -euo pipefail
@@ -79,6 +81,8 @@ jobs:
             -r linux-bionic-arm64 \
             --self-contained true \
             -p:PublishAot=true \
+            -p:PublishAotUsingRuntimePack=true \
+            -p:DisableUnsupportedError=true \
             -p:PublishSingleFile=false \
             -p:UseAppHost=true \
             -p:IS_AOT=true \
@@ -107,7 +111,6 @@ jobs:
           file "$BIN"
 
           readelf -h "$BIN" | grep -E 'Class:|Machine:'
-          readelf -l "$BIN" | grep -i interpreter || true
 
           if ! readelf -h "$BIN" | grep -q 'AArch64'; then
             echo "::error::Output is not an ARM64 executable."
@@ -117,7 +120,7 @@ jobs:
           echo "Dynamic dependencies:"
           readelf -d "$BIN" | grep NEEDED || true
 
-          echo "Checking .NET host markers (informational only):"
+          echo "Checking for .NET host markers:"
           strings "$BIN" | grep -im 5 -E \
             'hostfxr_main|hostpolicy|Download the .NET runtime' || true
 
