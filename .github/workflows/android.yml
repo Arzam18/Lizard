@@ -43,123 +43,23 @@ jobs:
           NDK_ROOT="$SDK_ROOT/ndk/$NDK_VERSION"
           NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
+          test -x "$NDK_BIN/aarch64-linux-android35-clang"
           test -x "$NDK_BIN/aarch64-linux-android35-clang++"
 
           echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
           echo "$NDK_BIN" >> "$GITHUB_PATH"
 
-      - name: Prepare SIMDe
+      - name: Verify ARM Support in Source
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f Bindings/SIMD.cpp
-          test -f Bindings/simd.h
+          grep -n 'AdvSimd' Logic/NN/NNUE.cs
 
-          if [ ! -f Bindings/simde/x86/avx2.h ]; then
-            git clone --depth 1 \
-              https://github.com/simd-everywhere/simde.git \
-              /tmp/simde-repo
-
-            mkdir -p Bindings/simde
-            cp -a /tmp/simde-repo/simde/. Bindings/simde/
-          fi
-
-          echo "SIMDe headers are ready."
-
-      - name: Patch ARM64 SIMD Source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("Bindings/SIMD.cpp")
-          source = path.read_text()
-
-          pattern = re.compile(
-              r'^(\s*)'
-              r'(u16 nnzIndices\[[^\]]+\]|'
-              r'i8 FTOutputs\[[^\]]+\]|'
-              r'vec_i32 L1Temp\[[^\]]+\]|'
-              r'float L1Outputs\[[^\]]+\]|'
-              r'vec_ps L2Outputs\[[^\]]+\])'
-              r'\s+alignas\(32\)'
-              r'(\s*=\s*\{\})?;',
-              re.MULTILINE
-          )
-
-          source, count = pattern.subn(
-              lambda m: f"{m.group(1)}alignas(32) "
-                        f"{m.group(2)}{m.group(3) or ''};",
-              source
-          )
-
-          if count != 5:
-              print(f"Expected to patch 5 alignment declarations; patched {count}.")
-              print("Current matching declarations:")
-              for number, line in enumerate(source.splitlines(), 1):
-                  if "alignas(32)" in line:
-                      print(f"{number}: {line}")
-              raise SystemExit(
-                  "Source layout differs from the expected version; refusing to continue."
-              )
-
-          path.write_text(source)
-          print("Patched all five alignment declarations.")
-
-          for line in source.splitlines():
-              if "alignas(32)" in line:
-                  print(line)
-          PY
-
-          if grep -nE \
-            'nnzIndices.*alignas|FTOutputs.*alignas|L1Temp.*alignas|L1Outputs.*alignas|L2Outputs.*alignas' \
-            Bindings/SIMD.cpp; then
-            echo "::error::Alignment declarations remain in the old format."
-            exit 1
-          fi
-
-      - name: Compile Android ARM64 SIMD Bindings
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" \
-            -std=c++20 \
-            -O3 \
-            -funroll-loops \
-            -march=armv8-a+simd \
-            -DSIMDE_NO_NATIVE \
-            -DSIMDE_ENABLE_NATIVE_ALIASES \
-            -I./Bindings \
-            -fPIC \
-            -shared \
-            -o HorsieBindings.so \
-            ./Bindings/SIMD.cpp \
-            -pthread
-
-          file HorsieBindings.so
-          readelf -h HorsieBindings.so | grep -E 'Class:|Machine:'
-
-      - name: Configure Runtime Identifier
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if ! grep -q '<RuntimeIdentifiers>' Lizard.csproj; then
-            sed -i \
-              's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>|' \
-              Lizard.csproj
-          fi
-
-          echo "Project publishing properties:"
-          grep -nE \
-            'TargetFramework|RuntimeIdentifier|PublishAot|PublishSingleFile' \
-            Lizard.csproj || true
+          echo "Native Horsie bindings will not be compiled."
+          echo "Lizard will use its built-in C# ARM SIMD path."
 
       - name: Restore Dependencies
         shell: bash
@@ -181,45 +81,54 @@ jobs:
             -p:PublishAot=true \
             -p:PublishSingleFile=false \
             -p:UseAppHost=true \
+            -p:IS_AOT=true \
             -p:InvariantGlobalization=true \
             -p:PublishTrimmed=false \
             -p:PublishReadyToRun=false \
-            -p:StripSymbols=false \
-            -p:BINDINGS=HorsieBindings.so
+            -p:StripSymbols=false
 
-      - name: Verify Native Output
+      - name: Verify Executable
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Published files:"
+          find bin/Release -type f -path '*/publish/*' -print
 
           BIN="$(find bin/Release -type f \
             -path '*/publish/Lizard' -print -quit)"
 
           if [ -z "$BIN" ]; then
-            echo "::error::Published Lizard executable not found."
+            echo "::error::Lizard executable was not found."
             find bin/Release -type f | head -100
             exit 1
           fi
 
           echo "Executable: $BIN"
           file "$BIN"
+
           readelf -h "$BIN" | grep -E 'Class:|Machine:'
           readelf -l "$BIN" | grep -i interpreter || true
 
           if ! readelf -h "$BIN" | grep -q 'AArch64'; then
-            echo "::error::Output is not an AArch64 executable."
+            echo "::error::Output is not an ARM64 executable."
             exit 1
           fi
 
+          echo "Dynamic dependencies:"
+          readelf -d "$BIN" | grep NEEDED || true
+
+          echo "Checking .NET host markers (informational only):"
+          strings "$BIN" | grep -im 5 -E \
+            'hostfxr_main|hostpolicy|Download the .NET runtime' || true
+
           mkdir -p artifacts
           install -m 755 "$BIN" artifacts/Lizard
-          install -m 644 HorsieBindings.so artifacts/HorsieBindings.so
-
           ls -lah artifacts
 
       - name: Upload Android ARM64 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lizard-android-arm64-native-aot
-          path: artifacts/*
+          path: artifacts/Lizard
           if-no-files-found: error
