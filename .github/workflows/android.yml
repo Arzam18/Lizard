@@ -32,7 +32,7 @@ jobs:
           SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
           if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android sdkmanager not found: $SDKMANAGER"
+            echo "::error::Android sdkmanager not found."
             find /usr/local/lib/android -name sdkmanager -type f 2>/dev/null || true
             exit 1
           fi
@@ -49,26 +49,45 @@ jobs:
           echo "ANDROID_NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
           echo "$NDK_BIN" >> "$GITHUB_PATH"
 
-      - name: Prepare SIMD Bindings
+      - name: Prepare SIMDe and Patch SIMD Source
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -d Bindings ]; then
-            echo "::error::Bindings directory not found. This workflow expects the repository's existing SIMD binding source."
+          test -f Bindings/SIMD.cpp
+          test -f Bindings/simd.h
+
+          mkdir -p Bindings/simde
+
+          if [ ! -f Bindings/simde/x86/avx2.h ]; then
+            git clone --depth 1 \
+              https://github.com/simd-everywhere/simde.git \
+              /tmp/simde-repo
+
+            cp -a /tmp/simde-repo/simde/. Bindings/simde/
+          fi
+
+          # Remove x86-only headers from the binding source.
+          # simd.h already includes SIMDe's AVX2 and FMA compatibility headers.
+          find Bindings -type f \
+            \( -name "*.cpp" -o -name "*.h" \) \
+            -exec sed -i -E \
+              '/^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]immintrin\.h[>"]/d;
+               /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]xmmintrin\.h[>"]/d' {} +
+
+          echo "Checking for remaining x86-only header includes:"
+          if grep -R -n -E \
+            '#[[:space:]]*include[[:space:]]*[<"](immintrin|xmmintrin)\.h[>"]' \
+            Bindings; then
+            echo "::error::An x86-only intrinsic header remains."
             exit 1
           fi
 
-          if [ ! -f Bindings/SIMD.cpp ]; then
-            echo "::error::Bindings/SIMD.cpp not found."
-            find Bindings -maxdepth 2 -type f
-            exit 1
-          fi
+          echo "SIMDe headers:"
+          test -f Bindings/simde/x86/avx2.h
+          test -f Bindings/simde/x86/fma.h
 
-          if [ ! -d Bindings/simde ]; then
-            git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
-            cp -a simde-repo/simde Bindings/simde
-          fi
+          echo "SIMD source preparation completed."
 
       - name: Compile Android ARM64 SIMD Bindings
         shell: bash
@@ -78,37 +97,34 @@ jobs:
           "$ANDROID_NDK_BIN/aarch64-linux-android35-clang++" \
             -std=c++20 \
             -O3 \
+            -funroll-loops \
             -march=armv8-a+simd \
-            -fPIC \
-            -shared \
             -DSIMDE_NO_NATIVE \
             -DSIMDE_ENABLE_NATIVE_ALIASES \
             -I./Bindings \
+            -fPIC \
+            -shared \
             -o HorsieBindings.so \
             ./Bindings/SIMD.cpp \
             -pthread
 
           file HorsieBindings.so
+          readelf -h HorsieBindings.so | grep -E 'Class:|Machine:'
 
-      - name: Verify Project Configuration
+      - name: Configure Android Runtime Identifier
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f Lizard.csproj
-
-          echo "Project configuration before publishing:"
-          grep -nE 'TargetFramework|PublishAot|PublishSingleFile|RuntimeIdentifier|RuntimeIdentifiers' Lizard.csproj || true
-
-          # Disable single-file publishing because Native AOT cannot use it.
-          # Enable AOT explicitly in the publish command below.
-
-          if grep -q '<PublishSingleFile>true</PublishSingleFile>' Lizard.csproj; then
-            sed -i 's|<PublishSingleFile>true</PublishSingleFile>|<PublishSingleFile>false</PublishSingleFile>|g' Lizard.csproj
+          if ! grep -q '<RuntimeIdentifiers>' Lizard.csproj; then
+            sed -i \
+              's|<TargetFramework>|<RuntimeIdentifiers>linux-bionic-arm64</RuntimeIdentifiers>\n    <TargetFramework>|' \
+              Lizard.csproj
           fi
 
-          echo "Project configuration after adjustment:"
-          grep -nE 'TargetFramework|PublishAot|PublishSingleFile|RuntimeIdentifier|RuntimeIdentifiers' Lizard.csproj || true
+          grep -nE \
+            'TargetFramework|RuntimeIdentifiers|PublishAot|PublishSingleFile' \
+            Lizard.csproj || true
 
       - name: Restore Dependencies
         shell: bash
@@ -131,48 +147,40 @@ jobs:
             -p:PublishSingleFile=false \
             -p:UseAppHost=true \
             -p:InvariantGlobalization=true \
-            -p:PublishTrimmed=true \
+            -p:PublishTrimmed=false \
             -p:PublishReadyToRun=false \
             -p:StripSymbols=false \
             -p:BINDINGS=HorsieBindings.so
 
-      - name: Locate and Verify Native AOT Output
+      - name: Verify Native Executable
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Published files:"
-          find bin/Release -type f -path '*/publish/*' -print
-
-          BIN="$(find bin/Release -type f -path '*/publish/Lizard' -print -quit)"
+          BIN="$(find bin/Release -type f \
+            -path '*/publish/Lizard' -print -quit)"
 
           if [ -z "$BIN" ]; then
-            echo "::error::Native Lizard executable was not found."
+            echo "::error::Published Lizard executable not found."
+            find bin/Release -type f | head -100
             exit 1
           fi
 
-          echo "Selected executable: $BIN"
+          echo "Executable: $BIN"
           file "$BIN"
-
           readelf -h "$BIN" | grep -E 'Class:|Machine:'
           readelf -l "$BIN" | grep -i interpreter || true
 
           if ! readelf -h "$BIN" | grep -q 'AArch64'; then
-            echo "::error::Output is not an AArch64 executable."
+            echo "::error::Executable is not ARM64."
             exit 1
-          fi
-
-          if strings "$BIN" | grep -E -m 5 'hostfxr_main|hostpolicy|Download the .NET runtime'; then
-            echo "::warning::Found .NET host-related strings; inspect the output before treating it as a standalone Native AOT engine."
           fi
 
           mkdir -p artifacts
           install -m 755 "$BIN" artifacts/Lizard
+          install -m 644 HorsieBindings.so artifacts/HorsieBindings.so
 
-          if [ -f HorsieBindings.so ]; then
-            install -m 644 HorsieBindings.so artifacts/HorsieBindings.so
-          fi
-
+          echo "Artifact files:"
           ls -lah artifacts
 
       - name: Upload Android ARM64 Artifact
