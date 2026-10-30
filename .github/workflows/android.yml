@@ -1,135 +1,137 @@
-name: Lizard Android Native AOT Build
+
+name: Lizard Android Bionic ARM64 AOT
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main", "master"]
 
 permissions:
   contents: read
 
 jobs:
-  build-android:
-    name: Lizard Android ARM64 Native AOT
+  build:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Lizard
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: 8.0.x
 
-      - name: Set up Android NDK
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip file binutils python3
+
+      - name: Install Android NDK r27c
         shell: bash
         run: |
           set -euo pipefail
 
-          NDK_VERSION="27.2.12479018"
-          SDK_ROOT="/usr/local/lib/android/sdk"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android sdkmanager not found."
-            find /usr/local/lib/android -name sdkmanager -type f 2>/dev/null || true
-            exit 1
-          fi
+          curl --fail --location --retry 3 \
+            "$URL" --output "$ARCHIVE"
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          echo "090e8083a715fdb1a3e402d0763c388abb03fb4e  $ARCHIVE" \
+            | sha1sum --check
 
-          NDK_ROOT="$SDK_ROOT/ndk/$NDK_VERSION"
-          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP"
 
-          test -x "$NDK_BIN/aarch64-linux-android35-clang"
-          test -x "$NDK_BIN/aarch64-linux-android35-clang++"
+          NDK="$RUNNER_TEMP/android-ndk-r27c"
+          NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
+          test -x "$NDK_BIN/clang"
+          test -x "$NDK_BIN/ld.lld"
+
           echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
-      - name: Verify ARM Support in Source
+      - name: Configure Lizard for Android AOT
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Lizard.csproj
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("Lizard.csproj")
+          source = path.read_text(encoding="utf-8-sig")
+
+          if "<TargetFramework>net8.0</TargetFramework>" not in source:
+              raise SystemExit("ERROR: Expected .NET 8 target not found.")
+
+          # Add the documented .NET 8 Android Bionic linker workaround.
+          marker = '<LinkerArg Include="-Wl,--undefined-version" />'
+
+          if marker not in source:
+              item_group = """
+            <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-bionic-arm64'">
+              <LinkerArg Include="-Wl,--undefined-version" />
+            </ItemGroup>
+          """
+              if "</Project>" not in source:
+                  raise SystemExit("ERROR: Missing closing Project element.")
+
+              source = source.rsplit("</Project>", 1)[0]
+              source += item_group + "\n</Project>\n"
+
+          path.write_text(source, encoding="utf-8")
+          print("Lizard project configured for Bionic linking.")
+          PY
+
+          grep -- '--undefined-version' Lizard.csproj
+
+      - name: Publish Lizard NativeAOT ARM64
         shell: bash
         run: |
           set -euo pipefail
 
-          grep -n 'AdvSimd' Logic/NN/NNUE.cs
-
-          echo "Native Horsie bindings are disabled."
-          echo "Using the managed ARM SIMD implementation."
-
-      - name: Restore Dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet restore Lizard.csproj \
-            -r linux-bionic-arm64
-
-      - name: Publish ARM64 Native AOT Executable
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export PATH="$ANDROID_NDK_BIN:$PATH"
+          rm -rf out
 
           dotnet publish Lizard.csproj \
-            -c Release \
-            -r linux-bionic-arm64 \
+            --configuration Release \
+            --runtime linux-bionic-arm64 \
             --self-contained true \
+            --output out \
             -p:PublishAot=true \
             -p:PublishAotUsingRuntimePack=true \
             -p:DisableUnsupportedError=true \
-            -p:IlcInstructionSet=base \
-            -p:PublishSingleFile=false \
-            -p:UseAppHost=true \
+            -p:PlatformTarget=AnyCPU \
+            -p:IlcInstructionSet=armv8.0 \
             -p:IS_AOT=true \
-            -p:InvariantGlobalization=true \
-            -p:PublishReadyToRun=false \
-            -p:StripSymbols=false
+            -p:InvariantGlobalization=true
 
-      - name: Verify Executable
+          test -s out/Lizard
+
+      - name: Verify executable
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Published files:"
-          find bin/Release -type f -path '*/publish/*' -print
+          file out/Lizard
 
-          BIN="$(find bin/Release -type f \
-            -path '*/publish/Lizard' -print -quit)"
+          readelf -h out/Lizard | grep -E 'Class:|Machine:'
+          readelf -h out/Lizard | grep -q AArch64
 
-          if [ -z "$BIN" ]; then
-            echo "::error::Lizard executable was not found."
-            find bin/Release -type f | head -100
-            exit 1
-          fi
-
-          echo "Executable: $BIN"
-          file "$BIN"
-
-          readelf -h "$BIN" | grep -E 'Class:|Machine:'
-
-          if ! readelf -h "$BIN" | grep -q 'AArch64'; then
-            echo "::error::Output is not an ARM64 executable."
-            exit 1
-          fi
+          echo "ELF interpreter:"
+          readelf -l out/Lizard \
+            | grep 'Requesting program interpreter' || true
 
           echo "Dynamic dependencies:"
-          readelf -d "$BIN" | grep NEEDED || true
+          readelf -d out/Lizard | grep NEEDED || true
 
-          mkdir -p artifacts
-          install -m 755 "$BIN" artifacts/Lizard
+          echo "SHA-256:"
+          sha256sum out/Lizard
 
-          echo "Final artifact:"
-          ls -lh artifacts/Lizard
-
-      - name: Upload Android ARM64 Artifact
+      - name: Upload Lizard Android ARM64
         uses: actions/upload-artifact@v4
         with:
-          name: lizard-android-arm64-native-aot
-          path: artifacts/Lizard
+          name: lizard-android-bionic-arm64
+          path: out/Lizard
           if-no-files-found: error
