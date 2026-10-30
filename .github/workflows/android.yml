@@ -103,7 +103,6 @@ jobs:
             -p:PublishAotUsingRuntimePack=true \
             -p:DisableUnsupportedError=true \
             -p:PlatformTarget=AnyCPU \
-            -p:IlcInstructionSet=armv8.0 \
             -p:IS_AOT=true \
             -p:InvariantGlobalization=true
 
