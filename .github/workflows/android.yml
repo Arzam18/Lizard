@@ -66,7 +66,6 @@ jobs:
           if "<TargetFramework>net8.0</TargetFramework>" not in source:
               raise SystemExit("ERROR: Expected .NET 8 target not found.")
 
-          # Add the documented .NET 8 Android Bionic linker workaround.
           marker = '<LinkerArg Include="-Wl,--undefined-version" />'
 
           if marker not in source:
@@ -100,6 +99,7 @@ jobs:
             --self-contained true \
             --output out \
             -p:PublishAot=true \
+            -p:PublishSingleFile=false \
             -p:PublishAotUsingRuntimePack=true \
             -p:DisableUnsupportedError=true \
             -p:PlatformTarget=AnyCPU \
