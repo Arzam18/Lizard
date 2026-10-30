@@ -59,6 +59,7 @@ jobs:
 
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("Lizard.csproj")
           source = path.read_text(encoding="utf-8-sig")
@@ -66,6 +67,28 @@ jobs:
           if "<TargetFramework>net8.0</TargetFramework>" not in source:
               raise SystemExit("ERROR: Expected .NET 8 target not found.")
 
+          # Prevent the host CPU's native instruction set from
+          # being passed during cross-compilation to Android ARM64.
+          pattern = re.compile(
+              r'<IlcArg\s+Condition="[^"]*IlcInstructionSet[^"]*"'
+              r'\s+Include="--instruction-set=native"\s*/>'
+          )
+
+          replacement = (
+              '<IlcArg Condition="\'$(IlcInstructionSet)\' == \'\' '
+              'and \'$(RuntimeIdentifier)\' != \'linux-bionic-arm64\'" '
+              'Include="--instruction-set=native" />'
+          )
+
+          source, count = pattern.subn(replacement, source)
+
+          if count != 1:
+              raise SystemExit(
+                  f"ERROR: Expected exactly one native instruction-set "
+                  f"argument, found {count}."
+              )
+
+          # Apply the Bionic linker workaround.
           marker = '<LinkerArg Include="-Wl,--undefined-version" />'
 
           if marker not in source:
@@ -81,10 +104,16 @@ jobs:
               source += item_group + "\n</Project>\n"
 
           path.write_text(source, encoding="utf-8")
-          print("Lizard project configured for Bionic linking.")
+
+          print("Lizard Android configuration applied:")
+          print("- .NET 8")
+          print("- NativeAOT")
+          print("- Bionic linker workaround")
+          print("- Host-native instruction set disabled for Android")
           PY
 
-          grep -- '--undefined-version' Lizard.csproj
+          grep -n -- '--instruction-set=native' Lizard.csproj
+          grep -n -- '--undefined-version' Lizard.csproj
 
       - name: Publish Lizard NativeAOT ARM64
         shell: bash
@@ -116,7 +145,11 @@ jobs:
           file out/Lizard
 
           readelf -h out/Lizard | grep -E 'Class:|Machine:'
-          readelf -h out/Lizard | grep -q AArch64
+
+          readelf -h out/Lizard | grep -q AArch64 || {
+            echo "ERROR: Not an ARM64 executable."
+            exit 1
+          }
 
           echo "ELF interpreter:"
           readelf -l out/Lizard \
